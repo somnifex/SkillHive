@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-skillhive}
+      POSTGRES_USER: ${POSTGRES_USER:-skillhive}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-skillhive-dev-only}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-skillhive} -d ${POSTGRES_DB:-skillhive}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      ENVIRONMENT: container
+      DEBUG: "false"
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-skillhive}:${POSTGRES_PASSWORD:-skillhive-dev-only}@postgres:5432/${POSTGRES_DB:-skillhive}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-development-secret-change-before-production}
+      CORS_ORIGINS: '["http://127.0.0.1:5173","http://localhost:5173"]'
+      COOKIE_SECURE: "false"
+      SEED_DEMO: ${SEED_DEMO:-true}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+  mysql:
+    image: mysql:8.4
+    profiles: ["mysql"]
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-skillhive}
+      MYSQL_USER: ${MYSQL_USER:-skillhive}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-skillhive-dev-only}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-dev-only}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-root-dev-only}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  postgres_data:
+  mysql_data:

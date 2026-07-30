@@ -1,0 +1,16 @@
+.git
+.venv
+.uv-cache
+.pnpm-store
+.logs
+.env
+data
+frontend/node_modules
+frontend/dist
+frontend/coverage
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.pyc
+*.log

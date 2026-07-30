@@ -1,0 +1,1 @@
+"""SkillHive backend application."""

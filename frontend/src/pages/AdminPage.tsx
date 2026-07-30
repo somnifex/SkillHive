@@ -1,4 +1,4 @@
-import { PlusOutlined } from "@ant-design/icons";
+import { Plus } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
@@ -135,7 +135,7 @@ export function AdminPage() {
                     title: "状态",
                     dataIndex: "status",
                     render: (status: string) => (
-                      <Tag color={status === "active" ? "green" : "red"}>{status}</Tag>
+                      <Tag color={status === "active" ? "geekblue" : "red"}>{status}</Tag>
                     ),
                   },
                   {
@@ -181,7 +181,7 @@ export function AdminPage() {
                 <div className="tab-actions">
                   <Button
                     type="primary"
-                    icon={<PlusOutlined />}
+                    icon={<Plus size={17} aria-hidden="true" />}
                     onClick={() => setSkillOpen(true)}
                   >
                     创建全局 Skill
@@ -246,7 +246,7 @@ export function AdminPage() {
                     title: "结果",
                     dataIndex: "result",
                     render: (result: string) => (
-                      <Tag color={result === "success" ? "green" : "red"}>{result}</Tag>
+                      <Tag color={result === "success" ? "blue" : "red"}>{result}</Tag>
                     ),
                   },
                   {

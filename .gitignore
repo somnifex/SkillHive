@@ -54,6 +54,11 @@ Desktop.ini
 .run/
 *.pid
 
+# Local content-generation artifacts
+.blog-assets/
+.blog-output/
+design-system/
+
 # Temporary working files
 tmp/
 temp/

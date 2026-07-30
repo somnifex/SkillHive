@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { Space, Typography } from "antd";
 
 interface Props {
   title: string;
@@ -9,16 +8,13 @@ interface Props {
 
 export function PageHeader({ title, description, actions }: Props) {
   return (
-    <div className="page-header">
-      <div>
-        <Typography.Title level={2}>{title}</Typography.Title>
-        {description && (
-          <Typography.Paragraph type="secondary">
-            {description}
-          </Typography.Paragraph>
-        )}
+    <header className="page-header">
+      <div className="page-heading">
+        <span className="page-kicker">CURATED WORKSPACE / CURRENT VIEW</span>
+        <h1>{title}</h1>
+        {description && <p>{description}</p>}
       </div>
-      <Space wrap>{actions}</Space>
-    </div>
+      {actions && <div className="page-actions">{actions}</div>}
+    </header>
   );
 }

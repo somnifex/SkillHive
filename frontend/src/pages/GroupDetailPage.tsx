@@ -1,10 +1,4 @@
-import {
-  ArrowLeftOutlined,
-  DeleteOutlined,
-  PlusOutlined,
-  SettingOutlined,
-  UserAddOutlined,
-} from "@ant-design/icons";
+import { ArrowLeft, Blocks, Plus, Settings, Trash2, UserPlus } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
@@ -169,7 +163,11 @@ export function GroupDetailPage() {
 
   return (
     <>
-      <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate("/groups")}>
+      <Button
+        type="text"
+        icon={<ArrowLeft size={17} aria-hidden="true" />}
+        onClick={() => navigate("/groups")}
+      >
         返回群组
       </Button>
       <PageHeader
@@ -179,7 +177,7 @@ export function GroupDetailPage() {
           <>
             {isManager && (
               <Button
-                icon={<SettingOutlined />}
+                icon={<Settings size={17} aria-hidden="true" />}
                 onClick={() => {
                   settingsForm.setFieldsValue(group.data);
                   setSettingsOpen(true);
@@ -223,7 +221,7 @@ export function GroupDetailPage() {
                   <div className="tab-actions">
                     <Button
                       type="primary"
-                      icon={<UserAddOutlined />}
+                      icon={<UserPlus size={17} aria-hidden="true" />}
                       onClick={() => setInviteOpen(true)}
                     >
                       邀请成员
@@ -289,7 +287,7 @@ export function GroupDetailPage() {
                   <div className="tab-actions">
                     <Button
                       type="primary"
-                      icon={<PlusOutlined />}
+                      icon={<Plus size={17} aria-hidden="true" />}
                       onClick={() => setSkillOpen(true)}
                     >
                       启用全局 Skill
@@ -323,7 +321,10 @@ export function GroupDetailPage() {
                     ]}
                   />
                 ) : (
-                  <Empty description="当前群组还没有启用 Skill" />
+                  <Empty
+                    image={<Blocks className="empty-icon" aria-hidden="true" />}
+                    description="当前群组还没有启用 Skill"
+                  />
                 )}
               </>
             ),
@@ -408,7 +409,7 @@ export function GroupDetailPage() {
           <div className="danger-footer">
             {group.data?.current_user_role === "owner" && (
               <Popconfirm title="确定解散群组？" onConfirm={dissolve}>
-                <Button danger icon={<DeleteOutlined />}>
+                <Button danger icon={<Trash2 size={17} aria-hidden="true" />}>
                   解散群组
                 </Button>
               </Popconfirm>

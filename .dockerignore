@@ -3,6 +3,9 @@
 .uv-cache
 .pnpm-store
 .logs
+.blog-assets
+.blog-output
+design-system
 .env
 data
 frontend/node_modules

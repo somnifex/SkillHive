@@ -1,10 +1,4 @@
-import {
-  DeleteOutlined,
-  EditOutlined,
-  FileAddOutlined,
-  PlusOutlined,
-  RocketOutlined,
-} from "@ant-design/icons";
+import { FilePlus2, Info, Pencil, Plus, Rocket, Search, Trash2 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -192,7 +186,11 @@ export function TemplatesPage() {
         title="Skill 模板库"
         description="从个人、群组或全局模板快速创建属于你的私人 Skill。"
         actions={
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+          <Button
+            type="primary"
+            icon={<Plus size={17} aria-hidden="true" />}
+            onClick={openCreate}
+          >
             添加模板
           </Button>
         }
@@ -201,14 +199,16 @@ export function TemplatesPage() {
         className="template-format-alert"
         type="info"
         showIcon
+        icon={<Info size={18} strokeWidth={1.7} aria-hidden="true" />}
         message="OpenAI 推荐格式"
         description="默认模板以 SKILL.md 为入口，生成包含 name、description 前置信息和清晰工作流的 Skill。"
       />
       <div className="toolbar">
-        <Input.Search
+        <Input
           allowClear
           placeholder="搜索模板名称或用途"
-          onSearch={setSearch}
+          prefix={<Search size={17} strokeWidth={1.7} aria-hidden="true" />}
+          onChange={(event) => setSearch(event.target.value)}
           className="search-input"
         />
         <Select
@@ -234,7 +234,7 @@ export function TemplatesPage() {
                 title={
                   <Space wrap>
                     <Typography.Text strong>{template.name}</Typography.Text>
-                    {template.is_default && <Tag color="green">默认</Tag>}
+                    {template.is_default && <Tag color="geekblue">默认</Tag>}
                   </Space>
                 }
                 extra={
@@ -248,7 +248,7 @@ export function TemplatesPage() {
                   <Button
                     key="use"
                     type="link"
-                    icon={<RocketOutlined />}
+                    icon={<Rocket size={17} aria-hidden="true" />}
                     onClick={() => openInstantiate(template)}
                   >
                     使用模板
@@ -258,7 +258,7 @@ export function TemplatesPage() {
                         <Button
                           key="edit"
                           type="text"
-                          icon={<EditOutlined />}
+                          icon={<Pencil size={17} aria-hidden="true" />}
                           onClick={() => openEdit(template)}
                         >
                           编辑
@@ -273,7 +273,7 @@ export function TemplatesPage() {
                             danger
                             type="text"
                             disabled={template.is_default}
-                            icon={<DeleteOutlined />}
+                            icon={<Trash2 size={17} aria-hidden="true" />}
                           >
                             删除
                           </Button>
@@ -299,7 +299,7 @@ export function TemplatesPage() {
       ) : (
         <Empty
           className="page-empty"
-          image={<FileAddOutlined className="empty-icon" />}
+          image={<FilePlus2 className="empty-icon" aria-hidden="true" />}
           description={templates.isLoading ? "正在加载模板" : "没有匹配的模板"}
         />
       )}

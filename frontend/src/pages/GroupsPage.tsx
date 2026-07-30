@@ -1,4 +1,4 @@
-import { PlusOutlined, TeamOutlined } from "@ant-design/icons";
+import { Plus, Users } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
@@ -59,7 +59,11 @@ export function GroupsPage() {
         title="我的群组"
         description="管理你加入和负责的协作空间。"
         actions={
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
+          <Button
+            type="primary"
+            icon={<Plus size={17} aria-hidden="true" />}
+            onClick={() => setOpen(true)}
+          >
             创建群组
           </Button>
         }
@@ -73,7 +77,14 @@ export function GroupsPage() {
         rowKey="id"
         loading={groups.isLoading}
         dataSource={groups.data?.items}
-        locale={{ emptyText: <Empty description="还没有群组" /> }}
+        locale={{
+          emptyText: (
+            <Empty
+              image={<Users className="empty-icon" aria-hidden="true" />}
+              description="还没有群组"
+            />
+          ),
+        }}
         onRow={(record) => ({
           onClick: () => navigate(`/groups/${record.id}`),
           className: "clickable-row",
@@ -84,7 +95,7 @@ export function GroupsPage() {
             render: (_: unknown, record: Group) => (
               <div className="group-name">
                 <div className="group-icon">
-                  <TeamOutlined />
+                  <Users size={19} strokeWidth={1.6} aria-hidden="true" />
                 </div>
                 <div>
                   <Typography.Text strong>{record.name}</Typography.Text>

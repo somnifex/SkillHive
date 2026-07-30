@@ -1,10 +1,4 @@
-import {
-  CopyOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  EyeOutlined,
-  PlusOutlined,
-} from "@ant-design/icons";
+import { Copy, Eye, PackageOpen, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
@@ -145,7 +139,7 @@ export function SkillsPage() {
         actions={
           <Button
             type="primary"
-            icon={<PlusOutlined />}
+            icon={<Plus size={17} aria-hidden="true" />}
             onClick={() => {
               setEditing(null);
               form.resetFields();
@@ -157,10 +151,11 @@ export function SkillsPage() {
         }
       />
       <div className="toolbar">
-        <Input.Search
+        <Input
           allowClear
           placeholder="搜索名称或描述"
-          onSearch={setSearch}
+          prefix={<Search size={17} strokeWidth={1.7} aria-hidden="true" />}
+          onChange={(event) => setSearch(event.target.value)}
           className="search-input"
         />
         <Select
@@ -178,7 +173,14 @@ export function SkillsPage() {
         rowKey="id"
         loading={skills.isLoading}
         dataSource={skills.data?.items}
-        locale={{ emptyText: <Empty description="还没有 Skill" /> }}
+        locale={{
+          emptyText: (
+            <Empty
+              image={<PackageOpen className="empty-icon" aria-hidden="true" />}
+              description="还没有 Skill"
+            />
+          ),
+        }}
         pagination={{
           total: skills.data?.total,
           pageSize: skills.data?.page_size ?? 20,
@@ -209,7 +211,9 @@ export function SkillsPage() {
           {
             title: "状态",
             dataIndex: "status",
-            render: (value: string) => <Tag color={value === "published" ? "green" : "default"}>{value}</Tag>,
+            render: (value: string) => (
+              <Tag color={value === "published" ? "geekblue" : "default"}>{value}</Tag>
+            ),
           },
           {
             title: "操作",
@@ -218,7 +222,7 @@ export function SkillsPage() {
                 <Button
                   type="text"
                   aria-label="查看"
-                  icon={<EyeOutlined />}
+                  icon={<Eye size={17} aria-hidden="true" />}
                   onClick={async () => {
                     const { data } = await api.get<Skill>(`/skills/${record.id}`);
                     setDetail(data);
@@ -227,13 +231,13 @@ export function SkillsPage() {
                 <Button
                   type="text"
                   aria-label="编辑"
-                  icon={<EditOutlined />}
+                  icon={<Pencil size={17} aria-hidden="true" />}
                   onClick={() => openEdit(record)}
                 />
                 <Button
                   type="text"
                   aria-label="复制"
-                  icon={<CopyOutlined />}
+                  icon={<Copy size={17} aria-hidden="true" />}
                   onClick={() => copy(record)}
                 />
                 <Popconfirm
@@ -241,7 +245,12 @@ export function SkillsPage() {
                   description="内容会被软删除，历史审计记录仍会保留。"
                   onConfirm={() => remove(record)}
                 >
-                  <Button danger type="text" icon={<DeleteOutlined />} />
+                  <Button
+                    danger
+                    type="text"
+                    aria-label="删除"
+                    icon={<Trash2 size={17} aria-hidden="true" />}
+                  />
                 </Popconfirm>
               </Space>
             ),

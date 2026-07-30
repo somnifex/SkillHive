@@ -1,4 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
+import { Eye, EyeOff } from "lucide-react";
 import { App, Avatar, Button, Card, Descriptions, Form, Input, Switch, Typography } from "antd";
 
 import { api, errorMessage } from "../api/client";
@@ -60,14 +61,30 @@ export function SettingsPage() {
               label="当前密码"
               rules={[{ required: true }]}
             >
-              <Input.Password />
+              <Input.Password
+                iconRender={(visible) =>
+                  visible ? (
+                    <EyeOff size={17} strokeWidth={1.7} aria-hidden="true" />
+                  ) : (
+                    <Eye size={17} strokeWidth={1.7} aria-hidden="true" />
+                  )
+                }
+              />
             </Form.Item>
             <Form.Item
               name="new_password"
               label="新密码"
               rules={[{ required: true }, { min: 8 }]}
             >
-              <Input.Password />
+              <Input.Password
+                iconRender={(visible) =>
+                  visible ? (
+                    <EyeOff size={17} strokeWidth={1.7} aria-hidden="true" />
+                  ) : (
+                    <Eye size={17} strokeWidth={1.7} aria-hidden="true" />
+                  )
+                }
+              />
             </Form.Item>
             <Button type="primary" htmlType="submit" loading={password.isPending}>
               更新密码

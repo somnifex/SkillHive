@@ -1,3 +1,4 @@
+import { Blocks } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Empty, Select, Table, Tag, Typography } from "antd";
 import { useState } from "react";
@@ -39,7 +40,14 @@ export function GroupSkillsPage() {
           rowKey="id"
           loading={grants.isLoading}
           dataSource={grants.data}
-          locale={{ emptyText: <Empty description="该群组没有可用 Skill" /> }}
+          locale={{
+            emptyText: (
+              <Empty
+                image={<Blocks className="empty-icon" aria-hidden="true" />}
+                description="该群组没有可用 Skill"
+              />
+            ),
+          }}
           columns={[
             {
               title: "Skill",
@@ -67,7 +75,11 @@ export function GroupSkillsPage() {
           ]}
         />
       ) : (
-        <Empty className="page-empty" description="先选择一个群组" />
+        <Empty
+          className="page-empty"
+          image={<Blocks className="empty-icon" aria-hidden="true" />}
+          description="先选择一个群组"
+        />
       )}
     </>
   );

@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::blob_store::{BlobRef, BlobStore, BlobStoreError};
+use crate::blob_store::{BlobStore, BlobStoreError};
 
 const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 const SKILL_ENTRYPOINT: &str = "SKILL.md";
@@ -36,12 +36,9 @@ pub struct SkillSnapshotManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillSnapshotFile {
-    /// Portable relative path with `/` separators.
     pub path: String,
     pub blob_hash: String,
     pub size_bytes: u64,
-    /// Unix permission bits when captured on Unix; absent on other platforms.
-    pub unix_mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,22 +73,8 @@ pub fn capture_workspace(
     for (relative, source) in source_files {
         let metadata = fs::metadata(&source)?;
         let size = metadata.len();
-        if size > policy.max_file_bytes {
-            return Err(SnapshotError::FileTooLarge {
-                path: source,
-                size,
-                limit: policy.max_file_bytes,
-            });
-        }
-        total_bytes = total_bytes
-            .checked_add(size)
-            .ok_or(SnapshotError::SizeOverflow)?;
-        if total_bytes > policy.max_total_bytes {
-            return Err(SnapshotError::SnapshotTooLarge {
-                size: total_bytes,
-                limit: policy.max_total_bytes,
-            });
-        }
+        enforce_file_size(&source, size, policy)?;
+        total_bytes = add_and_enforce_total(total_bytes, size, policy)?;
 
         let bytes = fs::read(&source)?;
         let blob = blobs.put_bytes(&bytes)?;
@@ -99,7 +82,6 @@ pub fn capture_workspace(
             path: relative,
             blob_hash: blob.hash,
             size_bytes: size,
-            unix_mode: unix_mode(&metadata),
         });
     }
 
@@ -107,6 +89,7 @@ pub fn capture_workspace(
         format_version: SNAPSHOT_FORMAT_VERSION,
         files,
     };
+    validate_manifest(&manifest, policy)?;
     let manifest_bytes = serde_json::to_vec(&manifest)?;
     let manifest_blob = blobs.put_bytes(&manifest_bytes)?;
 
@@ -121,21 +104,36 @@ pub fn read_manifest(
     blobs: &BlobStore,
     manifest_hash: &str,
 ) -> Result<SkillSnapshotManifest, SnapshotError> {
+    read_manifest_with_policy(blobs, manifest_hash, SnapshotPolicy::default())
+}
+
+pub fn read_manifest_with_policy(
+    blobs: &BlobStore,
+    manifest_hash: &str,
+    policy: SnapshotPolicy,
+) -> Result<SkillSnapshotManifest, SnapshotError> {
     let bytes = blobs.read_bytes(manifest_hash)?;
     let manifest: SkillSnapshotManifest = serde_json::from_slice(&bytes)?;
     if manifest.format_version != SNAPSHOT_FORMAT_VERSION {
         return Err(SnapshotError::UnsupportedFormat(manifest.format_version));
     }
-    validate_manifest(&manifest)?;
+    validate_manifest(&manifest, policy)?;
     Ok(manifest)
 }
 
-/// Materializes an immutable snapshot to a new directory. The destination must
-/// not exist; deployment code owns the final atomic activation step.
 pub fn materialize_snapshot(
     blobs: &BlobStore,
     manifest_hash: &str,
     destination: &Path,
+) -> Result<SkillSnapshotRef, SnapshotError> {
+    materialize_snapshot_with_policy(blobs, manifest_hash, destination, SnapshotPolicy::default())
+}
+
+pub fn materialize_snapshot_with_policy(
+    blobs: &BlobStore,
+    manifest_hash: &str,
+    destination: &Path,
+    policy: SnapshotPolicy,
 ) -> Result<SkillSnapshotRef, SnapshotError> {
     if destination.exists() {
         return Err(SnapshotError::DestinationExists(destination.to_path_buf()));
@@ -144,7 +142,7 @@ pub fn materialize_snapshot(
         return Err(SnapshotError::InvalidDestination(destination.to_path_buf()));
     }
 
-    let manifest = read_manifest(blobs, manifest_hash)?;
+    let manifest = read_manifest_with_policy(blobs, manifest_hash, policy)?;
     fs::create_dir_all(destination)?;
     let result = (|| -> Result<SkillSnapshotRef, SnapshotError> {
         let mut total_bytes = 0_u64;
@@ -169,11 +167,8 @@ pub fn materialize_snapshot(
                 .create_new(true)
                 .open(&target)?;
             target_file.write_all(&bytes)?;
-            apply_unix_mode(&target_file, file.unix_mode)?;
             target_file.sync_all()?;
-            total_bytes = total_bytes
-                .checked_add(file.size_bytes)
-                .ok_or(SnapshotError::SizeOverflow)?;
+            total_bytes = add_and_enforce_total(total_bytes, file.size_bytes, policy)?;
         }
         sync_tree_directories(destination)?;
         Ok(SkillSnapshotRef {
@@ -244,9 +239,19 @@ fn validate_workspace_root(path: &Path) -> Result<(), SnapshotError> {
     Ok(())
 }
 
-fn validate_manifest(manifest: &SkillSnapshotManifest) -> Result<(), SnapshotError> {
+fn validate_manifest(
+    manifest: &SkillSnapshotManifest,
+    policy: SnapshotPolicy,
+) -> Result<(), SnapshotError> {
+    if manifest.files.len() > policy.max_files {
+        return Err(SnapshotError::TooManyFiles {
+            limit: policy.max_files,
+        });
+    }
+
     let mut previous: Option<&str> = None;
     let mut has_entrypoint = false;
+    let mut total_bytes = 0_u64;
     for file in &manifest.files {
         portable_path_to_relative(&file.path)?;
         if previous.is_some_and(|value| value >= file.path.as_str()) {
@@ -259,11 +264,45 @@ fn validate_manifest(manifest: &SkillSnapshotManifest) -> Result<(), SnapshotErr
         if !is_canonical_sha256(&file.blob_hash) {
             return Err(SnapshotError::InvalidBlobHash(file.blob_hash.clone()));
         }
+        enforce_file_size(Path::new(&file.path), file.size_bytes, policy)?;
+        total_bytes = add_and_enforce_total(total_bytes, file.size_bytes, policy)?;
     }
     if !has_entrypoint {
         return Err(SnapshotError::MissingEntrypoint(PathBuf::from(SKILL_ENTRYPOINT)));
     }
     Ok(())
+}
+
+fn enforce_file_size(
+    path: &Path,
+    size: u64,
+    policy: SnapshotPolicy,
+) -> Result<(), SnapshotError> {
+    if size > policy.max_file_bytes {
+        return Err(SnapshotError::FileTooLarge {
+            path: path.to_path_buf(),
+            size,
+            limit: policy.max_file_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn add_and_enforce_total(
+    current: u64,
+    additional: u64,
+    policy: SnapshotPolicy,
+) -> Result<u64, SnapshotError> {
+    let total = current
+        .checked_add(additional)
+        .ok_or(SnapshotError::SizeOverflow)?;
+    if total > policy.max_total_bytes {
+        return Err(SnapshotError::SnapshotTooLarge {
+            size: total,
+            limit: policy.max_total_bytes,
+        });
+    }
+    Ok(total)
 }
 
 fn relative_to_portable_path(path: &Path) -> Result<String, SnapshotError> {
@@ -313,31 +352,6 @@ fn is_canonical_sha256(value: &str) -> bool {
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-#[cfg(unix)]
-fn unix_mode(metadata: &fs::Metadata) -> Option<u32> {
-    use std::os::unix::fs::PermissionsExt;
-    Some(metadata.permissions().mode() & 0o7777)
-}
-
-#[cfg(not(unix))]
-fn unix_mode(_metadata: &fs::Metadata) -> Option<u32> {
-    None
-}
-
-#[cfg(unix)]
-fn apply_unix_mode(file: &File, mode: Option<u32>) -> Result<(), SnapshotError> {
-    use std::os::unix::fs::PermissionsExt;
-    if let Some(mode) = mode {
-        file.set_permissions(fs::Permissions::from_mode(mode))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn apply_unix_mode(_file: &File, _mode: Option<u32>) -> Result<(), SnapshotError> {
-    Ok(())
 }
 
 fn sync_tree_directories(root: &Path) -> Result<(), SnapshotError> {
@@ -465,12 +479,32 @@ mod tests {
                 path: "../escape".to_owned(),
                 blob_hash: format!("sha256:{}", "a".repeat(64)),
                 size_bytes: 1,
-                unix_mode: None,
             }],
         };
         assert!(matches!(
-            validate_manifest(&manifest),
+            validate_manifest(&manifest, SnapshotPolicy::default()),
             Err(SnapshotError::InvalidManifestPath(_))
+        ));
+    }
+
+    #[test]
+    fn manifest_limits_are_enforced_before_materialization() {
+        let manifest = SkillSnapshotManifest {
+            format_version: SNAPSHOT_FORMAT_VERSION,
+            files: vec![SkillSnapshotFile {
+                path: "SKILL.md".to_owned(),
+                blob_hash: format!("sha256:{}", "a".repeat(64)),
+                size_bytes: 10,
+            }],
+        };
+        let policy = SnapshotPolicy {
+            max_files: 10,
+            max_file_bytes: 5,
+            max_total_bytes: 100,
+        };
+        assert!(matches!(
+            validate_manifest(&manifest, policy),
+            Err(SnapshotError::FileTooLarge { .. })
         ));
     }
 }

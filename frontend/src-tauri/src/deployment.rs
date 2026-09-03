@@ -13,7 +13,7 @@ const RESERVED_PREFIX: &str = ".skillhive-";
 /// Filesystem deployment engine for already-authorized local skill material.
 ///
 /// Authorization is intentionally resolved before this layer. The engine owns
-/// only local durability: stage -> validate -> journal -> swap -> cleanup.
+/// only local durability: intent -> stage -> validate -> swap -> cleanup.
 #[derive(Debug, Clone)]
 pub struct DeploymentEngine {
     journal_root: PathBuf,
@@ -42,6 +42,7 @@ pub struct DeploymentResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum DeploymentPhase {
+    Intent,
     Prepared,
     OldMoved,
     Activated,
@@ -98,20 +99,9 @@ impl DeploymentEngine {
             .join(format!("{RESERVED_PREFIX}backup-{transaction_id}"));
         let journal_path = self.journal_path(&transaction_id);
 
-        let staging_result = (|| -> Result<(), DeploymentError> {
-            copy_tree_durable(&request.source_dir, &staging)?;
-            validate_source_skill(&staging)?;
-            sync_directory(&request.skill_root)?;
-            Ok(())
-        })();
-        if let Err(error) = staging_result {
-            if staging.exists() {
-                remove_any(&staging).ok();
-                sync_directory(&request.skill_root).ok();
-            }
-            return Err(error);
-        }
-
+        // Persist the transaction plan before the first staging write. If the
+        // process dies during recursive copy, startup recovery can safely remove
+        // the partial staging tree instead of leaving an untracked orphan.
         let mut journal = DeploymentJournal {
             transaction_id: transaction_id.clone(),
             skill_id: request.skill_id.clone(),
@@ -121,9 +111,26 @@ impl DeploymentEngine {
             destination: destination.clone(),
             staging: staging.clone(),
             backup: backup.clone(),
-            phase: DeploymentPhase::Prepared,
+            phase: DeploymentPhase::Intent,
         };
         self.persist_journal(&journal_path, &journal)?;
+
+        let staging_result = (|| -> Result<(), DeploymentError> {
+            copy_tree_durable(&request.source_dir, &staging)?;
+            validate_source_skill(&staging)?;
+            sync_directory(&request.skill_root)?;
+            journal.phase = DeploymentPhase::Prepared;
+            self.persist_journal(&journal_path, &journal)?;
+            Ok(())
+        })();
+        if let Err(error) = staging_result {
+            if staging.exists() {
+                remove_any(&staging).ok();
+                sync_directory(&request.skill_root).ok();
+            }
+            self.remove_journal(&journal_path).ok();
+            return Err(error);
+        }
 
         let replaced_existing = destination.exists();
         let swap_result = (|| -> Result<(), DeploymentError> {
@@ -165,11 +172,6 @@ impl DeploymentEngine {
     }
 
     /// Reconciles interrupted filesystem transactions before new deployments.
-    ///
-    /// Recovery prefers a fully materialized staged version when the old target
-    /// has already been moved to backup; otherwise it restores the previous
-    /// target. A journal is removed only after the filesystem reaches a stable
-    /// state and the containing directory is synchronized where supported.
     pub fn recover_incomplete(&self) -> Result<RecoveryReport, DeploymentError> {
         fs::create_dir_all(&self.journal_root)?;
         let mut report = RecoveryReport {
@@ -207,6 +209,23 @@ impl DeploymentEngine {
         let staging_exists = journal.staging.exists();
         let backup_exists = journal.backup.exists();
 
+        if journal.phase == DeploymentPhase::Intent {
+            if backup_exists {
+                return Err(DeploymentError::UnrecoverableTransaction {
+                    transaction_id: journal.transaction_id,
+                    reason: "backup exists while latest durable phase is intent".to_owned(),
+                });
+            }
+            if staging_exists {
+                remove_any(&journal.staging)?;
+                sync_directory(&journal.skill_root)?;
+            }
+            // Destination, if present, predates this transaction and was never
+            // touched because Prepared was not durably reached.
+            self.remove_journal(journal_path)?;
+            return Ok(RecoveryDisposition::RolledBack);
+        }
+
         if destination_exists {
             if journal.phase == DeploymentPhase::Prepared && !backup_exists {
                 // No old target was moved. The visible destination is therefore
@@ -243,7 +262,7 @@ impl DeploymentEngine {
 
         if staging_exists && backup_exists {
             // Old target was moved but new target was not durably activated.
-            // The staging tree was validated before the first journal record, so
+            // The staging tree was validated before Prepared was persisted, so
             // roll forward to the new complete version.
             fs::rename(&journal.staging, &journal.destination)?;
             sync_directory(&journal.skill_root)?;
@@ -293,6 +312,7 @@ impl DeploymentEngine {
         let existed = journal_path.exists();
         let bytes = serde_json::to_vec(journal)?;
         let mut file = OpenOptions::new()
+            .write(true)
             .append(true)
             .create(true)
             .open(journal_path)?;
@@ -333,21 +353,22 @@ fn read_latest_journal(path: &Path) -> Result<DeploymentJournal, DeploymentError
         }
         match serde_json::from_str::<DeploymentJournal>(&line) {
             Ok(record) => latest = Some(record),
-            Err(error) if latest.is_some() => {
-                // An invalid trailing record is treated as an interrupted append.
-                // Stop immediately; valid records after corruption are not
-                // accepted because they would indicate external modification.
-                let _ = error;
+            Err(_) if latest.is_some() => {
+                // A malformed trailing record is an interrupted append. Stop at
+                // the previous complete phase; accepting later records would
+                // permit externally modified journals to skip corruption.
                 break;
             }
             Err(error) => return Err(DeploymentError::JournalSerialization(error)),
         }
     }
 
-    latest.ok_or_else(|| DeploymentError::InvalidJournal(format!(
-        "{} contains no complete journal record",
-        path.display()
-    )))
+    latest.ok_or_else(|| {
+        DeploymentError::InvalidJournal(format!(
+            "{} contains no complete journal record",
+            path.display()
+        ))
+    })
 }
 
 fn validate_request(request: &DeploymentRequest) -> Result<(), DeploymentError> {
@@ -641,6 +662,36 @@ mod tests {
     }
 
     #[test]
+    fn recovery_removes_partial_staging_from_intent_phase() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_root = temp.path().join("agent-skills");
+        fs::create_dir_all(&skill_root).expect("skill root");
+        let staging = skill_root.join(".skillhive-stage-tx1");
+        fs::create_dir_all(&staging).expect("partial staging");
+        fs::write(staging.join("partial"), b"partial").expect("partial file");
+
+        let engine = DeploymentEngine::open(temp.path().join("journals")).expect("engine");
+        let journal = DeploymentJournal {
+            transaction_id: "tx1".to_owned(),
+            skill_id: "skill-1".to_owned(),
+            agent_profile_id: "claude:default".to_owned(),
+            blob_hash: "sha256:new".to_owned(),
+            skill_root: skill_root.clone(),
+            destination: skill_root.join("code-review"),
+            staging: staging.clone(),
+            backup: skill_root.join(".skillhive-backup-tx1"),
+            phase: DeploymentPhase::Intent,
+        };
+        engine
+            .persist_journal(&engine.journal_path("tx1"), &journal)
+            .expect("journal");
+
+        let report = engine.recover_incomplete().expect("recover");
+        assert_eq!(report.rolled_back, 1);
+        assert!(!staging.exists());
+    }
+
+    #[test]
     fn recovery_rolls_forward_after_old_target_was_moved() {
         let temp = tempfile::tempdir().expect("tempdir");
         let skill_root = temp.path().join("agent-skills");
@@ -694,12 +745,12 @@ mod tests {
             destination: skill_root.join("code-review"),
             staging: skill_root.join(".skillhive-stage-tx1"),
             backup: skill_root.join(".skillhive-backup-tx1"),
-            phase: DeploymentPhase::Prepared,
+            phase: DeploymentPhase::Intent,
         };
         let path = engine.journal_path("tx1");
+        engine.persist_journal(&path, &journal).expect("intent");
+        journal.phase = DeploymentPhase::Prepared;
         engine.persist_journal(&path, &journal).expect("prepared");
-        journal.phase = DeploymentPhase::OldMoved;
-        engine.persist_journal(&path, &journal).expect("old moved");
         OpenOptions::new()
             .append(true)
             .open(&path)
@@ -708,6 +759,6 @@ mod tests {
             .expect("torn write");
 
         let recovered = read_latest_journal(&path).expect("latest");
-        assert_eq!(recovered.phase, DeploymentPhase::OldMoved);
+        assert_eq!(recovered.phase, DeploymentPhase::Prepared);
     }
 }

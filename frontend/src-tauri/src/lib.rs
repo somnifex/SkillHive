@@ -15,6 +15,7 @@ use tauri::Manager;
 #[derive(Debug, Clone, Serialize)]
 pub struct DesktopStartupStatus {
     pub local_store: LocalStoreHealth,
+    pub recovered_in_flight_mutations: u64,
     pub deployment_recovery: RecoveryReport,
 }
 
@@ -41,9 +42,10 @@ pub fn run() {
         .setup(|app| {
             // Startup performs only local correctness work. It does not refresh
             // credentials or access the network. Recovery is deterministic from
-            // durable local journals left by interrupted deployment operations.
+            // durable local state left by interrupted operations.
             let data_dir = app.path().app_local_data_dir()?;
             let store = LocalStore::open(data_dir.join("skillhive.sqlite3"))?;
+            let recovered_in_flight_mutations = store.recover_in_flight_mutations()?;
             let blobs = BlobStore::open(data_dir.join("blobs"))?;
             let deployment = DeploymentEngine::open(data_dir.join("deployment-journal"))?;
             let deployment_recovery = deployment.recover_incomplete()?;
@@ -56,6 +58,7 @@ pub fn run() {
             app.manage(registry);
             app.manage(DesktopStartupStatus {
                 local_store,
+                recovered_in_flight_mutations,
                 deployment_recovery,
             });
             Ok(())

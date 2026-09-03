@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -98,9 +98,19 @@ impl DeploymentEngine {
             .join(format!("{RESERVED_PREFIX}backup-{transaction_id}"));
         let journal_path = self.journal_path(&transaction_id);
 
-        copy_tree_durable(&request.source_dir, &staging)?;
-        validate_source_skill(&staging)?;
-        sync_directory(&request.skill_root)?;
+        let staging_result = (|| -> Result<(), DeploymentError> {
+            copy_tree_durable(&request.source_dir, &staging)?;
+            validate_source_skill(&staging)?;
+            sync_directory(&request.skill_root)?;
+            Ok(())
+        })();
+        if let Err(error) = staging_result {
+            if staging.exists() {
+                remove_any(&staging).ok();
+                sync_directory(&request.skill_root).ok();
+            }
+            return Err(error);
+        }
 
         let mut journal = DeploymentJournal {
             transaction_id: transaction_id.clone(),
@@ -139,8 +149,8 @@ impl DeploymentEngine {
 
         if let Err(error) = swap_result {
             // Do not perform an ad-hoc destructive rollback here. The durable
-            // journal is the source for deterministic recovery after any error
-            // or process interruption.
+            // append-only journal is the source for deterministic recovery after
+            // any error or process interruption.
             return Err(error);
         }
 
@@ -171,7 +181,7 @@ impl DeploymentEngine {
         let mut journals = fs::read_dir(&self.journal_root)?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("journal"))
             .collect::<Vec<_>>();
         journals.sort();
 
@@ -190,7 +200,7 @@ impl DeploymentEngine {
     }
 
     fn recover_one(&self, journal_path: &Path) -> Result<RecoveryDisposition, DeploymentError> {
-        let journal: DeploymentJournal = serde_json::from_slice(&fs::read(journal_path)?)?;
+        let journal = read_latest_journal(journal_path)?;
         validate_journal_paths(&journal)?;
 
         let destination_exists = journal.destination.exists();
@@ -198,16 +208,28 @@ impl DeploymentEngine {
         let backup_exists = journal.backup.exists();
 
         if destination_exists {
-            // The active path exists. If staging is gone, activation either
-            // completed or an old active directory was never touched. Phase and
-            // backup presence distinguish the two recoverable cases.
-            if journal.phase == DeploymentPhase::Prepared && !backup_exists && staging_exists {
-                remove_any(&journal.staging)?;
-                sync_directory(&journal.skill_root)?;
+            if journal.phase == DeploymentPhase::Prepared && !backup_exists {
+                // No old target was moved. The visible destination is therefore
+                // still the previous version and the staged candidate was never
+                // activated.
+                if staging_exists {
+                    remove_any(&journal.staging)?;
+                    sync_directory(&journal.skill_root)?;
+                }
                 self.remove_journal(journal_path)?;
                 return Ok(RecoveryDisposition::RolledBack);
             }
 
+            if journal.phase == DeploymentPhase::OldMoved && staging_exists && backup_exists {
+                return Err(DeploymentError::UnrecoverableTransaction {
+                    transaction_id: journal.transaction_id,
+                    reason: "active, staging, and backup paths all exist after old target was moved"
+                        .to_owned(),
+                });
+            }
+
+            // Activated may have completed before its phase record reached disk.
+            // Destination present + staging absent is safe to treat as committed.
             if staging_exists {
                 remove_any(&journal.staging)?;
             }
@@ -221,7 +243,8 @@ impl DeploymentEngine {
 
         if staging_exists && backup_exists {
             // Old target was moved but new target was not durably activated.
-            // The staging tree was validated before journaling, so roll forward.
+            // The staging tree was validated before the first journal record, so
+            // roll forward to the new complete version.
             fs::rename(&journal.staging, &journal.destination)?;
             sync_directory(&journal.skill_root)?;
             remove_any(&journal.backup)?;
@@ -256,41 +279,31 @@ impl DeploymentEngine {
     }
 
     fn journal_path(&self, transaction_id: &str) -> PathBuf {
-        self.journal_root.join(format!("{transaction_id}.json"))
+        self.journal_root.join(format!("{transaction_id}.journal"))
     }
 
+    /// Journal updates are append-only. Each complete phase record is followed
+    /// by a newline and fsynced. A crash can at worst leave one torn trailing
+    /// record; the previous complete phase remains available for recovery.
     fn persist_journal(
         &self,
         journal_path: &Path,
         journal: &DeploymentJournal,
     ) -> Result<(), DeploymentError> {
-        let temporary = journal_path.with_extension(format!("json.tmp-{}", Uuid::new_v4()));
+        let existed = journal_path.exists();
         let bytes = serde_json::to_vec(journal)?;
-        let result = (|| -> Result<(), DeploymentError> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            drop(file);
-
-            if journal_path.exists() {
-                // std::fs::rename cannot atomically replace an existing file on
-                // every supported platform. Remove only the previous journal;
-                // filesystem state remains recoverable even if interruption
-                // happens before the new journal rename.
-                fs::remove_file(journal_path)?;
-            }
-            fs::rename(&temporary, journal_path)?;
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(journal_path)?;
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        if !existed {
             sync_directory(&self.journal_root)?;
-            Ok(())
-        })();
-
-        if result.is_err() {
-            fs::remove_file(&temporary).ok();
         }
-        result
+        Ok(())
     }
 
     fn remove_journal(&self, journal_path: &Path) -> Result<(), DeploymentError> {
@@ -308,6 +321,35 @@ enum RecoveryDisposition {
     RolledBack,
 }
 
+fn read_latest_journal(path: &Path) -> Result<DeploymentJournal, DeploymentError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut latest = None;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<DeploymentJournal>(&line) {
+            Ok(record) => latest = Some(record),
+            Err(error) if latest.is_some() => {
+                // An invalid trailing record is treated as an interrupted append.
+                // Stop immediately; valid records after corruption are not
+                // accepted because they would indicate external modification.
+                let _ = error;
+                break;
+            }
+            Err(error) => return Err(DeploymentError::JournalSerialization(error)),
+        }
+    }
+
+    latest.ok_or_else(|| DeploymentError::InvalidJournal(format!(
+        "{} contains no complete journal record",
+        path.display()
+    )))
+}
+
 fn validate_request(request: &DeploymentRequest) -> Result<(), DeploymentError> {
     for (field, value) in [
         ("skill_id", request.skill_id.as_str()),
@@ -323,10 +365,20 @@ fn validate_request(request: &DeploymentRequest) -> Result<(), DeploymentError> 
     }
 
     validate_directory_name(&request.directory_name)?;
-    if request.source_dir.as_os_str().is_empty() || request.skill_root.as_os_str().is_empty() {
-        return Err(DeploymentError::InvalidRequest(
-            "source_dir and skill_root must not be empty".to_owned(),
-        ));
+    for (field, path) in [
+        ("source_dir", request.source_dir.as_path()),
+        ("skill_root", request.skill_root.as_path()),
+    ] {
+        if !path.is_absolute() {
+            return Err(DeploymentError::InvalidRequest(format!(
+                "{field} must be an absolute path"
+            )));
+        }
+        if path.to_str().is_none() {
+            return Err(DeploymentError::InvalidRequest(format!(
+                "{field} must be valid UTF-8"
+            )));
+        }
     }
     Ok(())
 }
@@ -409,6 +461,12 @@ fn copy_tree_durable(source: &Path, destination: &Path) -> Result<(), Deployment
 }
 
 fn validate_journal_paths(journal: &DeploymentJournal) -> Result<(), DeploymentError> {
+    if !journal.skill_root.is_absolute() {
+        return Err(DeploymentError::InvalidJournal(format!(
+            "transaction {} contains a relative skill root",
+            journal.transaction_id
+        )));
+    }
     for path in [&journal.destination, &journal.staging, &journal.backup] {
         if path.parent() != Some(journal.skill_root.as_path()) {
             return Err(DeploymentError::InvalidJournal(format!(
@@ -556,24 +614,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlink_inside_skill_tree() {
+    fn rejects_symlink_inside_skill_tree_and_cleans_staging() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         make_skill(&source, "v1");
         symlink("/tmp", source.join("escape")).expect("symlink");
+        let skill_root = temp.path().join("agent-skills");
         let engine = DeploymentEngine::open(temp.path().join("journals")).expect("engine");
 
         let result = engine.deploy(DeploymentRequest {
             skill_id: "skill-1".to_owned(),
             agent_profile_id: "claude:default".to_owned(),
             source_dir: source,
-            skill_root: temp.path().join("agent-skills"),
+            skill_root: skill_root.clone(),
             directory_name: "safe-name".to_owned(),
             blob_hash: "sha256:v1".to_owned(),
         });
         assert!(matches!(result, Err(DeploymentError::SymlinkNotAllowed(_))));
+        let leftovers = fs::read_dir(skill_root)
+            .expect("skill root")
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty());
     }
 
     #[test]
@@ -613,5 +677,37 @@ mod tests {
             fs::read_to_string(destination.join(SKILL_ENTRYPOINT)).expect("read"),
             "# new\n"
         );
+    }
+
+    #[test]
+    fn append_only_journal_uses_last_complete_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = DeploymentEngine::open(temp.path().join("journals")).expect("engine");
+        let skill_root = temp.path().join("agent-skills");
+        fs::create_dir_all(&skill_root).expect("skill root");
+        let mut journal = DeploymentJournal {
+            transaction_id: "tx1".to_owned(),
+            skill_id: "skill-1".to_owned(),
+            agent_profile_id: "claude:default".to_owned(),
+            blob_hash: "sha256:new".to_owned(),
+            skill_root: skill_root.clone(),
+            destination: skill_root.join("code-review"),
+            staging: skill_root.join(".skillhive-stage-tx1"),
+            backup: skill_root.join(".skillhive-backup-tx1"),
+            phase: DeploymentPhase::Prepared,
+        };
+        let path = engine.journal_path("tx1");
+        engine.persist_journal(&path, &journal).expect("prepared");
+        journal.phase = DeploymentPhase::OldMoved;
+        engine.persist_journal(&path, &journal).expect("old moved");
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open")
+            .write_all(b"{\"transaction_id\":")
+            .expect("torn write");
+
+        let recovered = read_latest_journal(&path).expect("latest");
+        assert_eq!(recovered.phase, DeploymentPhase::OldMoved);
     }
 }

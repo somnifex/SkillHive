@@ -7,14 +7,17 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const SKILL_ENTRYPOINT: &str = "SKILL.md";
+use crate::{
+    blob_store::BlobStore,
+    skill_snapshot::{materialize_snapshot, SnapshotError},
+};
+
 const RESERVED_PREFIX: &str = ".skillhive-";
 
-/// Filesystem deployment engine for already-authorized local skill material.
+/// Filesystem deployment engine for already-authorized immutable skill snapshots.
 ///
-/// Authorization is intentionally resolved before this layer. The engine owns
-/// filesystem durability only. A successful deployment journal remains until
-/// the caller commits the matching SQLite catalog row and explicitly ACKs it.
+/// A successful filesystem transaction remains journaled until the caller
+/// commits the matching SQLite deployment catalog row and explicitly ACKs it.
 #[derive(Debug, Clone)]
 pub struct DeploymentEngine {
     journal_root: PathBuf,
@@ -24,10 +27,9 @@ pub struct DeploymentEngine {
 pub struct DeploymentRequest {
     pub skill_id: String,
     pub agent_profile_id: String,
-    pub source_dir: PathBuf,
+    pub snapshot_hash: String,
     pub skill_root: PathBuf,
     pub directory_name: String,
-    pub blob_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +38,7 @@ pub struct DeploymentResult {
     pub skill_id: String,
     pub agent_profile_id: String,
     pub target_path: PathBuf,
-    pub blob_hash: String,
+    pub snapshot_hash: String,
     pub replaced_existing: bool,
 }
 
@@ -54,7 +56,7 @@ struct DeploymentJournal {
     transaction_id: String,
     skill_id: String,
     agent_profile_id: String,
-    blob_hash: String,
+    snapshot_hash: String,
     skill_root: PathBuf,
     destination: PathBuf,
     staging: PathBuf,
@@ -70,7 +72,7 @@ impl DeploymentJournal {
             skill_id: self.skill_id.clone(),
             agent_profile_id: self.agent_profile_id.clone(),
             target_path: self.destination.clone(),
-            blob_hash: self.blob_hash.clone(),
+            snapshot_hash: self.snapshot_hash.clone(),
             replaced_existing: self.replaced_existing,
         }
     }
@@ -95,14 +97,17 @@ impl DeploymentEngine {
         &self.journal_root
     }
 
-    /// Installs or updates one skill directory.
+    /// Installs or updates one immutable snapshot.
     ///
     /// The returned deployment is filesystem-complete but intentionally not
-    /// finalized. The caller must durably record it in LocalStore and then call
-    /// `acknowledge_catalog_commit` with the transaction id.
-    pub fn deploy(&self, request: DeploymentRequest) -> Result<DeploymentResult, DeploymentError> {
+    /// finalized. The caller must record it in LocalStore and then call
+    /// `acknowledge_catalog_commit`.
+    pub fn deploy(
+        &self,
+        blobs: &BlobStore,
+        request: DeploymentRequest,
+    ) -> Result<DeploymentResult, DeploymentError> {
         validate_request(&request)?;
-        validate_source_skill(&request.source_dir)?;
         ensure_directory_root(&request.skill_root)?;
 
         let transaction_id = Uuid::new_v4().to_string();
@@ -120,7 +125,7 @@ impl DeploymentEngine {
             transaction_id: transaction_id.clone(),
             skill_id: request.skill_id.clone(),
             agent_profile_id: request.agent_profile_id.clone(),
-            blob_hash: request.blob_hash.clone(),
+            snapshot_hash: request.snapshot_hash.clone(),
             skill_root: request.skill_root.clone(),
             destination: destination.clone(),
             staging: staging.clone(),
@@ -131,8 +136,7 @@ impl DeploymentEngine {
         self.persist_journal(&journal_path, &journal)?;
 
         let staging_result = (|| -> Result<(), DeploymentError> {
-            copy_tree_durable(&request.source_dir, &staging)?;
-            validate_source_skill(&staging)?;
+            materialize_snapshot(blobs, &request.snapshot_hash, &staging)?;
             sync_directory(&request.skill_root)?;
             journal.phase = DeploymentPhase::Prepared;
             self.persist_journal(&journal_path, &journal)?;
@@ -174,8 +178,6 @@ impl DeploymentEngine {
         Ok(journal.result())
     }
 
-    /// Removes an Activated journal only after the caller has durably committed
-    /// the matching deployment row to SQLite.
     pub fn acknowledge_catalog_commit(&self, transaction_id: &str) -> Result<(), DeploymentError> {
         validate_transaction_id(transaction_id)?;
         let journal_path = self.journal_path(transaction_id);
@@ -190,9 +192,6 @@ impl DeploymentEngine {
         self.remove_journal(&journal_path)
     }
 
-    /// Reconciles interrupted filesystem transactions before new deployments.
-    /// Activated results are returned in `catalog_commits` and their journals
-    /// remain until SQLite persistence is ACKed by the caller.
     pub fn recover_incomplete(&self) -> Result<RecoveryReport, DeploymentError> {
         fs::create_dir_all(&self.journal_root)?;
         let mut report = RecoveryReport {
@@ -397,7 +396,7 @@ fn validate_request(request: &DeploymentRequest) -> Result<(), DeploymentError> 
     for (field, value) in [
         ("skill_id", request.skill_id.as_str()),
         ("agent_profile_id", request.agent_profile_id.as_str()),
-        ("blob_hash", request.blob_hash.as_str()),
+        ("snapshot_hash", request.snapshot_hash.as_str()),
         ("directory_name", request.directory_name.as_str()),
     ] {
         if value.trim().is_empty() {
@@ -408,20 +407,15 @@ fn validate_request(request: &DeploymentRequest) -> Result<(), DeploymentError> 
     }
 
     validate_directory_name(&request.directory_name)?;
-    for (field, path) in [
-        ("source_dir", request.source_dir.as_path()),
-        ("skill_root", request.skill_root.as_path()),
-    ] {
-        if !path.is_absolute() {
-            return Err(DeploymentError::InvalidRequest(format!(
-                "{field} must be an absolute path"
-            )));
-        }
-        if path.to_str().is_none() {
-            return Err(DeploymentError::InvalidRequest(format!(
-                "{field} must be valid UTF-8"
-            )));
-        }
+    if !request.skill_root.is_absolute() {
+        return Err(DeploymentError::InvalidRequest(
+            "skill_root must be an absolute path".to_owned(),
+        ));
+    }
+    if request.skill_root.to_str().is_none() {
+        return Err(DeploymentError::InvalidRequest(
+            "skill_root must be valid UTF-8".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -458,59 +452,6 @@ fn ensure_directory_root(path: &Path) -> Result<(), DeploymentError> {
         fs::create_dir_all(path)?;
         sync_existing_ancestor(path)?;
     }
-    Ok(())
-}
-
-fn validate_source_skill(path: &Path) -> Result<(), DeploymentError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| DeploymentError::InvalidSourceSkill(path.to_path_buf()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(DeploymentError::InvalidSourceSkill(path.to_path_buf()));
-    }
-
-    let entrypoint = path.join(SKILL_ENTRYPOINT);
-    let entrypoint_metadata = fs::symlink_metadata(&entrypoint)
-        .map_err(|_| DeploymentError::MissingSkillEntrypoint(entrypoint.clone()))?;
-    if entrypoint_metadata.file_type().is_symlink() || !entrypoint_metadata.is_file() {
-        return Err(DeploymentError::MissingSkillEntrypoint(entrypoint));
-    }
-    Ok(())
-}
-
-fn copy_tree_durable(source: &Path, destination: &Path) -> Result<(), DeploymentError> {
-    if destination.exists() {
-        return Err(DeploymentError::StagingCollision(destination.to_path_buf()));
-    }
-    fs::create_dir(destination)?;
-
-    let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-
-    for entry in entries {
-        let source_path = entry.path();
-        let target_path = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path)?;
-        let file_type = metadata.file_type();
-
-        if file_type.is_symlink() {
-            return Err(DeploymentError::SymlinkNotAllowed(source_path));
-        }
-        if file_type.is_dir() {
-            copy_tree_durable(&source_path, &target_path)?;
-        } else if file_type.is_file() {
-            let mut source_file = File::open(&source_path)?;
-            let mut target_file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&target_path)?;
-            io::copy(&mut source_file, &mut target_file)?;
-            target_file.sync_all()?;
-        } else {
-            return Err(DeploymentError::UnsupportedFileType(source_path));
-        }
-    }
-
-    sync_directory(destination)?;
     Ok(())
 }
 
@@ -568,6 +509,8 @@ fn sync_directory(_path: &Path) -> Result<(), DeploymentError> {
 pub enum DeploymentError {
     #[error("deployment filesystem error: {0}")]
     Io(#[from] io::Error),
+    #[error("skill snapshot error: {0}")]
+    Snapshot(#[from] SnapshotError),
     #[error("deployment journal serialization error: {0}")]
     JournalSerialization(#[from] serde_json::Error),
     #[error("invalid deployment request: {0}")]
@@ -580,16 +523,8 @@ pub enum DeploymentError {
     InvalidDirectoryName(String),
     #[error("invalid agent skill root: {0}")]
     InvalidSkillRoot(PathBuf),
-    #[error("invalid source skill directory: {0}")]
-    InvalidSourceSkill(PathBuf),
-    #[error("skill entrypoint is missing or invalid: {0}")]
-    MissingSkillEntrypoint(PathBuf),
-    #[error("symbolic links are not allowed in managed skills: {0}")]
-    SymlinkNotAllowed(PathBuf),
-    #[error("unsupported file type in skill tree: {0}")]
+    #[error("unsupported file type in deployment path: {0}")]
     UnsupportedFileType(PathBuf),
-    #[error("staging path unexpectedly exists: {0}")]
-    StagingCollision(PathBuf),
     #[error("invalid deployment journal: {0}")]
     InvalidJournal(String),
     #[error("deployment transaction {transaction_id} cannot be recovered: {reason}")]
@@ -602,33 +537,37 @@ pub enum DeploymentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill_snapshot::{capture_workspace, SnapshotPolicy};
 
-    fn make_skill(root: &Path, marker: &str) {
+    fn make_workspace(root: &Path, marker: &str) {
         fs::create_dir_all(root.join("scripts")).expect("mkdir");
-        fs::write(root.join(SKILL_ENTRYPOINT), format!("# {marker}\n")).expect("skill md");
-        fs::write(root.join("scripts").join("run.sh"), marker).expect("script");
+        fs::write(root.join("SKILL.md"), format!("# {marker}\n")).expect("skill");
+        fs::write(root.join("scripts").join("run.py"), marker).expect("script");
     }
 
-    fn request(source: PathBuf, skill_root: PathBuf) -> DeploymentRequest {
+    fn request(snapshot_hash: String, skill_root: PathBuf) -> DeploymentRequest {
         DeploymentRequest {
             skill_id: "skill-1".to_owned(),
             agent_profile_id: "claude-code:default".to_owned(),
-            source_dir: source,
+            snapshot_hash,
             skill_root,
             directory_name: "code-review".to_owned(),
-            blob_hash: "sha256:abc".to_owned(),
         }
     }
 
     #[test]
     fn successful_deploy_requires_catalog_ack() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let source = temp.path().join("source");
-        let skill_root = temp.path().join("agent-skills");
-        make_skill(&source, "v1");
+        let workspace = temp.path().join("workspace");
+        make_workspace(&workspace, "v1");
+        let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
+        let snapshot =
+            capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("snapshot");
         let engine = DeploymentEngine::open(temp.path().join("journals")).expect("engine");
 
-        let result = engine.deploy(request(source, skill_root)).expect("deploy");
+        let result = engine
+            .deploy(&blobs, request(snapshot.manifest_hash, temp.path().join("agent-skills")))
+            .expect("deploy");
         assert!(engine.journal_path(&result.transaction_id).exists());
         engine
             .acknowledge_catalog_commit(&result.transaction_id)
@@ -644,8 +583,10 @@ mod tests {
         let destination = skill_root.join("code-review");
         let staging = skill_root.join(".skillhive-stage-tx1");
         let backup = skill_root.join(".skillhive-backup-tx1");
-        make_skill(&destination, "old");
-        make_skill(&staging, "new");
+        fs::create_dir_all(&destination).expect("old");
+        fs::write(destination.join("SKILL.md"), b"old").expect("old skill");
+        fs::create_dir_all(&staging).expect("new");
+        fs::write(staging.join("SKILL.md"), b"new").expect("new skill");
         fs::rename(&destination, &backup).expect("move old");
 
         let engine = DeploymentEngine::open(temp.path().join("journals")).expect("engine");
@@ -653,7 +594,7 @@ mod tests {
             transaction_id: "tx1".to_owned(),
             skill_id: "skill-1".to_owned(),
             agent_profile_id: "claude-code:default".to_owned(),
-            blob_hash: "sha256:new".to_owned(),
+            snapshot_hash: format!("sha256:{}", "a".repeat(64)),
             skill_root: skill_root.clone(),
             destination: destination.clone(),
             staging,
@@ -674,56 +615,21 @@ mod tests {
     }
 
     #[test]
-    fn intent_recovery_removes_partial_staging() {
+    fn path_traversal_directory_name_is_rejected() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let skill_root = temp.path().join("agent-skills");
-        fs::create_dir_all(&skill_root).expect("skill root");
-        let staging = skill_root.join(".skillhive-stage-tx1");
-        fs::create_dir_all(&staging).expect("staging");
-        fs::write(staging.join("partial"), b"partial").expect("partial");
+        let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
         let engine = DeploymentEngine::open(temp.path().join("journals")).expect("engine");
-        let journal = DeploymentJournal {
-            transaction_id: "tx1".to_owned(),
-            skill_id: "skill-1".to_owned(),
-            agent_profile_id: "claude-code:default".to_owned(),
-            blob_hash: "sha256:new".to_owned(),
-            skill_root: skill_root.clone(),
-            destination: skill_root.join("code-review"),
-            staging: staging.clone(),
-            backup: skill_root.join(".skillhive-backup-tx1"),
-            replaced_existing: false,
-            phase: DeploymentPhase::Intent,
-        };
-        engine
-            .persist_journal(&engine.journal_path("tx1"), &journal)
-            .expect("journal");
-
-        let report = engine.recover_incomplete().expect("recover");
-        assert_eq!(report.rolled_back, 1);
-        assert!(!staging.exists());
-        assert!(!engine.journal_path("tx1").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlink_inside_skill_tree_and_cleans_journal() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source = temp.path().join("source");
-        make_skill(&source, "v1");
-        symlink("/tmp", source.join("escape")).expect("symlink");
-        let skill_root = temp.path().join("agent-skills");
-        let journal_root = temp.path().join("journals");
-        let engine = DeploymentEngine::open(&journal_root).expect("engine");
-
-        let result = engine.deploy(request(source, skill_root));
-        assert!(matches!(result, Err(DeploymentError::SymlinkNotAllowed(_))));
-        assert!(fs::read_dir(journal_root)
-            .expect("journals")
-            .filter_map(Result::ok)
-            .next()
-            .is_none());
+        let result = engine.deploy(
+            &blobs,
+            DeploymentRequest {
+                skill_id: "skill-1".to_owned(),
+                agent_profile_id: "custom:test".to_owned(),
+                snapshot_hash: format!("sha256:{}", "a".repeat(64)),
+                skill_root: temp.path().join("agent-skills"),
+                directory_name: "../escape".to_owned(),
+            },
+        );
+        assert!(matches!(result, Err(DeploymentError::InvalidDirectoryName(_))));
     }
 
     #[test]
@@ -736,7 +642,7 @@ mod tests {
             transaction_id: "tx1".to_owned(),
             skill_id: "skill-1".to_owned(),
             agent_profile_id: "claude-code:default".to_owned(),
-            blob_hash: "sha256:new".to_owned(),
+            snapshot_hash: format!("sha256:{}", "a".repeat(64)),
             skill_root: skill_root.clone(),
             destination: skill_root.join("code-review"),
             staging: skill_root.join(".skillhive-stage-tx1"),

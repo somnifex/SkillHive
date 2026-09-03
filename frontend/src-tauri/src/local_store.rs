@@ -228,11 +228,6 @@ pub struct LocalStoreHealth {
 }
 
 impl LocalStore {
-    /// Opens the desktop database and applies forward-only schema migrations.
-    ///
-    /// The connection is intentionally serialized behind a mutex. Desktop write
-    /// volume is low, and a single writer makes transaction ownership explicit
-    /// while SQLite WAL still permits concurrent readers at the database level.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, LocalStoreError> {
         let db_path = db_path.as_ref().to_path_buf();
         if let Some(parent) = db_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -282,8 +277,6 @@ impl LocalStore {
 fn configure_connection(connection: &Connection) -> Result<(), LocalStoreError> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
-    // FULL is deliberate: once the desktop reports a local edit as committed,
-    // a host crash must not trade durability for a small latency improvement.
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.execute_batch(
         r#"
@@ -327,6 +320,8 @@ pub enum LocalStoreError {
     SkillNotFound(String),
     #[error("agent profile not found: {0}")]
     AgentProfileNotFound(String),
+    #[error("outbox mutation claim was lost for id {0}")]
+    OutboxClaimLost(String),
     #[error("path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),
 }

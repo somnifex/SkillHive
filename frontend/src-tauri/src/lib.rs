@@ -369,7 +369,7 @@ fn deploy_skill_to_agent(
         .map_err(|error| error.to_string())?;
 
     let recovery_pending = deployment_engine
-        .acknowledge_catalog_commit(&filesystem_result.transaction_id)
+        .acknowledge_catalog_commit(&blobs, &filesystem_result.transaction_id)
         .is_err();
 
     Ok(DeploySkillToAgentResult {
@@ -416,14 +416,22 @@ fn uninstall_skill_from_agent(
         })
         .map_err(|error| error.to_string())?;
 
-    store
-        .remove_deployment_catalog(
-            &deployment.skill_id,
-            &deployment.agent_profile_id,
-            &deployment.deployed_blob_hash,
-            &deployment.target_path,
-        )
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = store.remove_deployment_catalog(
+        &deployment.skill_id,
+        &deployment.agent_profile_id,
+        &deployment.deployed_blob_hash,
+        &deployment.target_path,
+    ) {
+        // The filesystem half may already be quarantined. Re-read SQLite and
+        // reconcile immediately using the same authority rule as startup. If
+        // SQLite itself is unavailable, the durable journal is intentionally
+        // left for next startup rather than guessing commit state.
+        let recovery_note = reconcile_uninstall_recovery(&store, &uninstall_engine)
+            .err()
+            .map(|recovery_error| format!("; immediate recovery failed: {recovery_error}"))
+            .unwrap_or_default();
+        return Err(format!("deployment catalog removal failed: {error}{recovery_note}"));
+    }
 
     let recovery_pending = filesystem
         .transaction_id
@@ -527,14 +535,10 @@ fn discover_and_reconcile_agents(
         .into_iter()
         .filter(|profile| profile.is_custom)
     {
-        let validation_error = if profile.skill_root.exists() && !profile.skill_root.is_dir() {
-            Some(format!(
-                "{} exists but is not a directory",
-                profile.skill_root.display()
-            ))
-        } else {
-            None
-        };
+        let validation_error = agent::validate_skill_root(&profile.skill_root)
+            .err()
+            .map(|error| error.to_string());
+        let root_exists = validation_error.is_none() && profile.skill_root.is_dir();
         results.push(AgentDiscoveryResult {
             descriptor: AgentDescriptor {
                 id: profile.descriptor_id.clone(),
@@ -546,7 +550,7 @@ fn discover_and_reconcile_agents(
                     id: profile.id,
                     descriptor_id: profile.descriptor_id,
                     display_name: profile.display_name,
-                    skill_root_exists: profile.skill_root.exists(),
+                    skill_root_exists: root_exists,
                     skill_root: profile.skill_root,
                     enabled: profile.enabled,
                     detected: true,
@@ -620,9 +624,12 @@ pub fn run() {
             let workspaces = WorkspaceStore::open(data_dir.join("workspaces"))?;
             let deployment = DeploymentEngine::open(data_dir.join("deployment-journal"))?;
             let uninstall = UninstallEngine::open(data_dir.join("uninstall-journal"))?;
-            let mut deployment_recovery = deployment.recover_incomplete()?;
+            let mut deployment_recovery = deployment.recover_incomplete(&blobs)?;
 
             for recovered in deployment_recovery.catalog_commits.clone() {
+                // DeploymentEngine already verified before roll-forward. Verify
+                // again at the cross-resource boundary immediately before SQLite
+                // catalog replay to detect post-recovery local tampering.
                 if let Err(error) = verify_materialized_snapshot(
                     &blobs,
                     &recovered.snapshot_hash,
@@ -645,8 +652,8 @@ pub fn run() {
                 });
                 match catalog_result {
                     Ok(_) => {
-                        if let Err(error) =
-                            deployment.acknowledge_catalog_commit(&recovered.transaction_id)
+                        if let Err(error) = deployment
+                            .acknowledge_catalog_commit(&blobs, &recovered.transaction_id)
                         {
                             deployment_recovery.failed.push(format!(
                                 "catalog committed for {}, but deployment journal ACK failed: {error}",

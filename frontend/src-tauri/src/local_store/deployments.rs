@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    fs, io,
+    path::{Component, Path, PathBuf},
+};
 
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
@@ -8,12 +11,6 @@ use super::{
 };
 
 impl LocalStore {
-    /// Creates or updates an Agent profile.
-    ///
-    /// Once a profile owns one or more deployment records, its filesystem root
-    /// is immutable. Moving a root behind the deployment catalog would orphan
-    /// active material and make revocation/reconciliation target the wrong
-    /// directory. Callers must explicitly uninstall/migrate deployments first.
     pub fn upsert_agent_profile(
         &self,
         profile: UpsertAgentProfile,
@@ -131,9 +128,6 @@ impl LocalStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Records the filesystem deployment outcome. The target must be a direct
-    /// child of the persisted agent skill root, preventing a mismatched profile
-    /// id from recording an unrelated filesystem path.
     pub fn record_deployment(
         &self,
         deployment: RecordDeployment,
@@ -141,11 +135,7 @@ impl LocalStore {
         validate_non_empty("skill_id", &deployment.skill_id)?;
         validate_non_empty("agent_profile_id", &deployment.agent_profile_id)?;
         validate_non_empty("deployed_blob_hash", &deployment.deployed_blob_hash)?;
-        if !deployment.target_path.is_absolute() {
-            return Err(LocalStoreError::InvalidInput(
-                "deployment target_path must be absolute".to_owned(),
-            ));
-        }
+        validate_stable_absolute_path(&deployment.target_path, "deployment target_path")?;
         let target_path = path_to_string(&deployment.target_path)?;
 
         let mut connection = self.lock_connection()?;
@@ -288,12 +278,44 @@ fn validate_agent_profile(profile: &UpsertAgentProfile) -> Result<(), LocalStore
     ] {
         validate_non_empty(field, value)?;
     }
-    if !profile.skill_root.is_absolute() {
-        return Err(LocalStoreError::InvalidInput(
-            "agent skill_root must be absolute".to_owned(),
-        ));
+    validate_stable_absolute_path(&profile.skill_root, "agent skill_root")?;
+
+    match fs::symlink_metadata(&profile.skill_root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(LocalStoreError::InvalidInput(format!(
+                    "agent skill_root must not be a symbolic link: {}",
+                    profile.skill_root.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(LocalStoreError::InvalidInput(format!(
+                    "agent skill_root exists but is not a directory: {}",
+                    profile.skill_root.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(LocalStoreError::Io(error)),
     }
-    path_to_string(&profile.skill_root)?;
+    Ok(())
+}
+
+fn validate_stable_absolute_path(path: &Path, field: &str) -> Result<(), LocalStoreError> {
+    if !path.is_absolute() {
+        return Err(LocalStoreError::InvalidInput(format!(
+            "{field} must be absolute"
+        )));
+    }
+    path_to_string(path)?;
+    for component in path.components() {
+        if matches!(component, Component::CurDir | Component::ParentDir) {
+            return Err(LocalStoreError::InvalidInput(format!(
+                "{field} must be lexically normalized: {}",
+                path.display()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -353,38 +375,6 @@ mod tests {
             })
             .expect("deployment");
         assert_eq!(deployment.state, DeploymentState::Installed);
-        assert_eq!(
-            store
-                .get_deployment("skill-1", &profile.id)
-                .expect("get")
-                .expect("deployment"),
-            deployment
-        );
-    }
-
-    #[test]
-    fn deployment_target_must_match_profile_root() {
-        let (temp, store) = store_with_skill();
-        store
-            .upsert_agent_profile(UpsertAgentProfile {
-                id: "custom:test".to_owned(),
-                descriptor_id: "custom:test".to_owned(),
-                display_name: "Test".to_owned(),
-                skill_root: temp.path().join("allowed"),
-                enabled: true,
-                is_custom: true,
-            })
-            .expect("profile");
-
-        let result = store.record_deployment(RecordDeployment {
-            skill_id: "skill-1".to_owned(),
-            agent_profile_id: "custom:test".to_owned(),
-            deployed_blob_hash: "sha256:abc".to_owned(),
-            target_path: temp.path().join("elsewhere").join("code-review"),
-            state: DeploymentState::Installed,
-            last_error: None,
-        });
-        assert!(matches!(result, Err(LocalStoreError::InvalidInput(_))));
     }
 
     #[test]

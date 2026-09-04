@@ -1,4 +1,5 @@
 import base64
+import binascii
 
 _CURSOR_PREFIX = "v1."
 _CURSOR_BYTES = 8
@@ -33,7 +34,7 @@ def decode_sync_cursor(cursor: str | None) -> int:
             altchars=b"-_",
             validate=True,
         )
-    except (ValueError, base64.binascii.Error) as error:
+    except (ValueError, binascii.Error) as error:
         raise SyncCursorError("malformed sync cursor") from error
     if len(payload) != _CURSOR_BYTES:
         raise SyncCursorError("malformed sync cursor")

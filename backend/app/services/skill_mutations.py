@@ -110,13 +110,14 @@ class SkillMutationService:
         if content is not None:
             version_name = version or self.next_patch_version(skill)
             self.ensure_version_available(skill.id, version_name)
+            version_manifest = (
+                manifest if manifest is not None else {"name": skill.slug, "schema_version": 1}
+            )
             created_version = self._create_version_row(
                 skill=skill,
                 version=version_name,
                 content=content,
-                manifest=manifest
-                if manifest is not None
-                else {"name": skill.slug, "schema_version": 1},
+                manifest=version_manifest,
                 dependency_config=dependency_config or {},
                 change_log=change_log,
                 status=version_status,
@@ -236,13 +237,15 @@ class SkillMutationService:
             raise AppError("VERSION_EXISTS", "This version already exists.", 409)
 
     def next_patch_version(self, skill: Skill) -> str:
+        if skill.current_version_id is None:
+            return "0.1.0"
         current = self.session.get(SkillVersion, skill.current_version_id)
         if current is None:
             return "0.1.0"
         base = current.version.split("-", 1)[0]
         try:
             major, minor, patch = (int(part) for part in base.split("."))
-        except (TypeError, ValueError):
+        except ValueError:
             return "0.1.0"
         return f"{major}.{minor}.{patch + 1}"
 

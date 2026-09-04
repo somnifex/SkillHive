@@ -7,7 +7,6 @@ mod sync_state;
 mod uninstall;
 
 pub use cache::{CacheSkillRecord, LocalCachePolicy};
-pub use sync_state::LocalSyncState;
 
 use std::{
     fs,
@@ -54,7 +53,7 @@ impl SkillSyncState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy,PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOperation {
     Create,

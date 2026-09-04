@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{validate_skill_root, AgentAdapterError},
+    agent::{validate_persisted_profile, validate_skill_root, AgentAdapterError},
     blob_store::BlobStore,
     local_store::{LocalStore, LocalStoreError},
     skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotError, SnapshotPolicy},
@@ -51,7 +51,17 @@ pub fn import_agent_skill(
         return Err(AgentSkillImportError::ProfileDisabled(profile.id));
     }
 
+    // Revalidate persisted identity/path before every privileged read. This
+    // treats accidental/corrupt SQLite state as untrusted rather than assuming
+    // that every row must have passed the original insertion boundary.
+    validate_persisted_profile(
+        &profile.id,
+        &profile.descriptor_id,
+        &profile.skill_root,
+        profile.is_custom,
+    )?;
     validate_skill_root(&profile.skill_root)?;
+
     let source = profile.skill_root.join(&request.directory_name);
     if source.parent() != Some(profile.skill_root.as_path()) {
         return Err(AgentSkillImportError::InvalidDirectoryName(

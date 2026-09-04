@@ -3,6 +3,7 @@ mod deployments;
 mod migrations;
 mod mutations;
 mod skills;
+mod uninstall;
 
 pub use cache::{CacheSkillRecord, LocalCachePolicy};
 
@@ -331,6 +332,11 @@ pub enum LocalStoreError {
         current_root: PathBuf,
         requested_root: PathBuf,
         deployment_count: u64,
+    },
+    #[error("deployment catalog changed while uninstalling skill {skill_id} from profile {agent_profile_id}")]
+    DeploymentCatalogChanged {
+        skill_id: String,
+        agent_profile_id: String,
     },
     #[error("path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),

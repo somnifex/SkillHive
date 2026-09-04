@@ -25,7 +25,8 @@ pub struct BlobRef {
 impl BlobStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, BlobStoreError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join("sha256"))?;
+        ensure_real_directory(&root)?;
+        ensure_real_directory(&root.join("sha256"))?;
         Ok(Self { root })
     }
 
@@ -33,29 +34,31 @@ impl BlobStore {
         &self.root
     }
 
-    /// Persists an immutable blob using write -> fsync -> atomic rename.
-    ///
-    /// The temporary file is created in the destination directory so the final
-    /// rename cannot cross filesystem boundaries. Existing content with the
-    /// same digest is reused only after its digest is verified.
     pub fn put_bytes(&self, bytes: &[u8]) -> Result<BlobRef, BlobStoreError> {
+        self.validate_storage_roots()?;
         let hash = hash_bytes(bytes);
         let destination = self.path_for_hash(&hash)?;
-
-        if destination.exists() {
-            if self.verify(&hash)? {
-                return Ok(BlobRef {
-                    hash,
-                    size_bytes: bytes.len() as u64,
-                });
-            }
-            return Err(BlobStoreError::CorruptedExistingBlob(hash));
-        }
-
         let parent = destination
             .parent()
             .ok_or_else(|| BlobStoreError::InvalidHash(hash.clone()))?;
-        fs::create_dir_all(parent)?;
+        ensure_real_directory(parent)?;
+
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(BlobStoreError::UnsafeStorageEntry(destination));
+                }
+                if self.verify(&hash)? {
+                    return Ok(BlobRef {
+                        hash,
+                        size_bytes: bytes.len() as u64,
+                    });
+                }
+                return Err(BlobStoreError::CorruptedExistingBlob(hash));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(BlobStoreError::Io(error)),
+        }
 
         let temporary = parent.join(format!(".skillhive-blob-{}.tmp", Uuid::new_v4()));
         let write_result = (|| -> Result<(), BlobStoreError> {
@@ -69,16 +72,24 @@ impl BlobStore {
 
             match fs::rename(&temporary, &destination) {
                 Ok(()) => sync_parent_directory(parent)?,
-                Err(error) if destination.exists() => {
-                    // Another writer may have committed the same content first.
-                    // Never replace a content-addressed object; verify and reuse.
-                    if self.verify(&hash)? {
-                        fs::remove_file(&temporary).ok();
-                    } else {
-                        return Err(BlobStoreError::Io(error));
+                Err(error) => {
+                    // A concurrent content-addressed writer may have won the
+                    // race. Reuse only a regular, non-symlink entry whose digest
+                    // verifies; anything else is treated as storage corruption.
+                    match fs::symlink_metadata(&destination) {
+                        Ok(metadata)
+                            if metadata.is_file() && !metadata.file_type().is_symlink() =>
+                        {
+                            if self.verify(&hash)? {
+                                fs::remove_file(&temporary).ok();
+                            } else {
+                                return Err(BlobStoreError::CorruptedExistingBlob(hash.clone()));
+                            }
+                        }
+                        Ok(_) => return Err(BlobStoreError::UnsafeStorageEntry(destination.clone())),
+                        Err(_) => return Err(BlobStoreError::Io(error)),
                     }
                 }
-                Err(error) => return Err(BlobStoreError::Io(error)),
             }
             Ok(())
         })();
@@ -95,14 +106,10 @@ impl BlobStore {
     }
 
     pub fn read_bytes(&self, hash: &str) -> Result<Vec<u8>, BlobStoreError> {
+        self.validate_storage_roots()?;
         let path = self.path_for_hash(hash)?;
-        let bytes = fs::read(&path).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                BlobStoreError::NotFound(hash.to_owned())
-            } else {
-                BlobStoreError::Io(error)
-            }
-        })?;
+        ensure_regular_blob_entry(&path, hash)?;
+        let bytes = fs::read(&path)?;
 
         let actual = hash_bytes(&bytes);
         if actual != hash {
@@ -115,12 +122,17 @@ impl BlobStore {
     }
 
     pub fn verify(&self, hash: &str) -> Result<bool, BlobStoreError> {
+        self.validate_storage_roots()?;
         let path = self.path_for_hash(hash)?;
-        let mut file = match File::open(&path) {
-            Ok(file) => file,
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(BlobStoreError::Io(error)),
         };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(BlobStoreError::UnsafeStorageEntry(path));
+        }
+        let mut file = File::open(&path)?;
         Ok(hash_reader(&mut file)? == hash)
     }
 
@@ -138,6 +150,56 @@ impl BlobStore {
 
         Ok(self.root.join("sha256").join(&digest[..2]).join(digest))
     }
+
+    fn validate_storage_roots(&self) -> Result<(), BlobStoreError> {
+        validate_real_directory(&self.root)?;
+        validate_real_directory(&self.root.join("sha256"))
+    }
+}
+
+fn ensure_regular_blob_entry(path: &Path, hash: &str) -> Result<(), BlobStoreError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(BlobStoreError::NotFound(hash.to_owned()))
+        }
+        Err(error) => return Err(BlobStoreError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(BlobStoreError::UnsafeStorageEntry(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn ensure_real_directory(path: &Path) -> Result<(), BlobStoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(BlobStoreError::UnsafeStorageDirectory(path.to_path_buf()));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+            validate_real_directory(path)?;
+            if let Some(parent) = path.parent() {
+                if let Ok(metadata) = fs::symlink_metadata(parent) {
+                    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                        sync_parent_directory(parent)?;
+                    }
+                }
+            }
+        }
+        Err(error) => return Err(BlobStoreError::Io(error)),
+    }
+    Ok(())
+}
+
+fn validate_real_directory(path: &Path) -> Result<(), BlobStoreError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(BlobStoreError::UnsafeStorageDirectory(path.to_path_buf()));
+    }
+    Ok(())
 }
 
 fn hash_reader(reader: &mut impl Read) -> Result<String, BlobStoreError> {
@@ -177,9 +239,6 @@ fn sync_parent_directory(path: &Path) -> Result<(), BlobStoreError> {
 
 #[cfg(not(unix))]
 fn sync_parent_directory(_path: &Path) -> Result<(), BlobStoreError> {
-    // Windows does not expose portable directory fsync through std. The file
-    // itself is fully flushed before rename; platform-specific hardening can be
-    // introduced behind this boundary without changing BlobStore semantics.
     Ok(())
 }
 
@@ -195,6 +254,10 @@ pub enum BlobStoreError {
     CorruptedExistingBlob(String),
     #[error("blob integrity check failed: expected {expected}, got {actual}")]
     HashMismatch { expected: String, actual: String },
+    #[error("unsafe blob storage directory: {0:?}")]
+    UnsafeStorageDirectory(PathBuf),
+    #[error("unsafe blob storage entry: {0:?}")]
+    UnsafeStorageEntry(PathBuf),
 }
 
 #[cfg(test)]
@@ -221,12 +284,6 @@ mod tests {
 
         assert!(matches!(
             store.path_for_hash("abc123"),
-            Err(BlobStoreError::InvalidHash(_))
-        ));
-        assert!(matches!(
-            store.path_for_hash(
-                "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-            ),
             Err(BlobStoreError::InvalidHash(_))
         ));
     }

@@ -3,9 +3,11 @@ mod deployments;
 mod migrations;
 mod mutations;
 mod skills;
+mod sync_state;
 mod uninstall;
 
 pub use cache::{CacheSkillRecord, LocalCachePolicy};
+pub use sync_state::LocalSyncState;
 
 use std::{
     fs,
@@ -177,12 +179,31 @@ pub struct LocalSkill {
 pub struct LocalMutation {
     pub id: String,
     pub skill_id: String,
+    pub local_sequence: u64,
     pub operation: MutationOperation,
     pub base_revision: Option<i64>,
     pub payload_hash: String,
     pub state: MutationState,
     pub retry_count: u32,
+    pub next_attempt_at: Option<String>,
+    pub last_attempt_at: Option<String>,
+    pub server_error_code: Option<String>,
+    pub server_error_details: Option<String>,
+    pub acknowledged_remote_revision: Option<i64>,
+    pub acknowledged_remote_id: Option<String>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalSyncState {
+    pub protocol_version: u32,
+    pub client_instance_id: Option<String>,
+    pub device_id: Option<String>,
+    pub server_user_id: Option<String>,
+    pub server_cursor: Option<String>,
+    pub last_successful_push_at: Option<String>,
+    pub last_successful_pull_at: Option<String>,
+    pub last_server_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +359,8 @@ pub enum LocalStoreError {
         skill_id: String,
         agent_profile_id: String,
     },
+    #[error("outbox claim lost for mutation {0}")]
+    OutboxClaimLost(String),
     #[error("path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),
 }

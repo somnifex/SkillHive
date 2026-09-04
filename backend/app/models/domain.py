@@ -3,6 +3,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -135,6 +136,8 @@ class Skill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     current_version_id: Mapped[str | None] = mapped_column(String(36))
+    sync_revision: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    current_package_hash: Mapped[str | None] = mapped_column(String(71))
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -147,15 +150,21 @@ class Skill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class SkillVersion(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "skill_versions"
-    __table_args__ = (UniqueConstraint("skill_id", "version", name="uq_skill_version"),)
+    __table_args__ = (
+        UniqueConstraint("skill_id", "version", name="uq_skill_version"),
+        UniqueConstraint("skill_id", "revision", name="uq_skill_version_revision"),
+    )
 
     skill_id: Mapped[str] = mapped_column(
         ForeignKey("skills.id", ondelete="CASCADE"),
         index=True,
     )
     version: Mapped[str] = mapped_column(String(40))
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[dict[str, Any]] = mapped_column(JSON)
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    package_manifest_hash: Mapped[str | None] = mapped_column(String(71))
+    package_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     dependency_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     change_log: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)

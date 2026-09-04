@@ -1,7 +1,10 @@
+mod cache;
 mod deployments;
 mod migrations;
 mod mutations;
 mod skills;
+
+pub use cache::{CacheSkillRecord, LocalCachePolicy};
 
 use std::{
     fs,

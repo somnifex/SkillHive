@@ -1,12 +1,11 @@
 use std::{
-    env,
-    path::{Path, PathBuf},
+    env, fs, io,
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier for an agent implementation known by SkillHive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDescriptor {
     pub id: String,
@@ -22,12 +21,6 @@ pub enum AgentKind {
     Custom,
 }
 
-/// A concrete local installation/profile of an agent.
-///
-/// The deployment target is stored on the instance itself. UI selection must
-/// never redirect an already-created instance to another application's path.
-/// Authorization is deliberately absent from this type; adapters describe
-/// local filesystem capabilities only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInstance {
     pub id: String,
@@ -159,11 +152,14 @@ impl AgentAdapter for BuiltInAgentAdapter {
     fn discover(&self) -> Result<Vec<AgentInstance>, AgentAdapterError> {
         let home = home_dir()?;
         let skill_root = home.join(&self.relative_skill_root);
-        let detected = skill_root.exists()
+        let detected = path_entry_exists(&skill_root)?
             || self
                 .detection_roots
                 .iter()
-                .any(|candidate| home.join(candidate).exists());
+                .map(|candidate| path_entry_exists(&home.join(candidate)))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|exists| exists);
 
         if !detected {
             return Ok(Vec::new());
@@ -174,7 +170,7 @@ impl AgentAdapter for BuiltInAgentAdapter {
             id: format!("{}:default", self.descriptor.id),
             descriptor_id: self.descriptor.id.clone(),
             display_name: self.descriptor.display_name.clone(),
-            skill_root_exists: skill_root.exists(),
+            skill_root_exists: path_entry_exists(&skill_root)?,
             skill_root,
             enabled: true,
             detected: true,
@@ -222,7 +218,7 @@ impl AgentAdapter for CustomAgentAdapter {
             id: format!("{}:configured", self.descriptor.id),
             descriptor_id: self.descriptor.id.clone(),
             display_name: self.descriptor.display_name.clone(),
-            skill_root_exists: self.skill_root.exists(),
+            skill_root_exists: path_entry_exists(&self.skill_root)?,
             skill_root: self.skill_root.clone(),
             enabled: true,
             detected: true,
@@ -282,19 +278,53 @@ fn built_in_adapters() -> Vec<BuiltInAgentAdapter> {
     ]
 }
 
-fn validate_skill_root(path: &Path) -> Result<(), AgentAdapterError> {
-    if path.as_os_str().is_empty() {
+pub fn validate_skill_root(path: &Path) -> Result<(), AgentAdapterError> {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
         return Err(AgentAdapterError::InvalidPath(
-            "skill root must not be empty".to_owned(),
+            "skill root must be an absolute path".to_owned(),
         ));
     }
-    if path.exists() && !path.is_dir() {
-        return Err(AgentAdapterError::InvalidPath(format!(
-            "{} exists but is not a directory",
-            path.display()
-        )));
+    if path.to_str().is_none() {
+        return Err(AgentAdapterError::InvalidPath(
+            "skill root must be valid UTF-8".to_owned(),
+        ));
+    }
+    for component in path.components() {
+        if matches!(component, Component::CurDir | Component::ParentDir) {
+            return Err(AgentAdapterError::InvalidPath(format!(
+                "skill root is not lexically normalized: {}",
+                path.display()
+            )));
+        }
+    }
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(AgentAdapterError::InvalidPath(format!(
+                    "skill root must not be a symbolic link: {}",
+                    path.display()
+                )));
+            }
+            if !metadata.is_dir() {
+                return Err(AgentAdapterError::InvalidPath(format!(
+                    "{} exists but is not a directory",
+                    path.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AgentAdapterError::Discovery(error.to_string())),
     }
     Ok(())
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool, AgentAdapterError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AgentAdapterError::Discovery(error.to_string())),
+    }
 }
 
 fn home_dir() -> Result<PathBuf, AgentAdapterError> {
@@ -310,10 +340,16 @@ fn home_dir() -> Result<PathBuf, AgentAdapterError> {
     #[cfg(not(windows))]
     let candidate = env::var_os("HOME");
 
-    candidate
+    let path = candidate
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
-        .ok_or(AgentAdapterError::HomeDirectoryUnavailable)
+        .ok_or(AgentAdapterError::HomeDirectoryUnavailable)?;
+    if !path.is_absolute() {
+        return Err(AgentAdapterError::InvalidPath(
+            "home directory must be absolute".to_owned(),
+        ));
+    }
+    Ok(path)
 }
 
 #[derive(Debug, thiserror::Error)]

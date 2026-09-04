@@ -50,6 +50,7 @@ impl LocalStore {
         )?;
 
         let local_sequence = next_local_sequence(&transaction, &edit.skill_id)?;
+        let local_sequence_value = checked_local_sequence(local_sequence, &mutation_id)?;
         transaction.execute(
             r#"
             INSERT INTO local_mutations(
@@ -71,7 +72,7 @@ impl LocalStore {
         Ok(LocalMutation {
             id: mutation_id,
             skill_id: edit.skill_id,
-            local_sequence: local_sequence.try_into().unwrap_or(u64::MAX),
+            local_sequence: local_sequence_value,
             operation: edit.operation,
             base_revision: edit.base_revision,
             payload_hash: edit.blob_hash,
@@ -120,6 +121,7 @@ impl LocalStore {
             [skill_id],
         )?;
         let local_sequence = next_local_sequence(&transaction, skill_id)?;
+        let local_sequence_value = checked_local_sequence(local_sequence, &mutation_id)?;
         transaction.execute(
             r#"
             INSERT INTO local_mutations(
@@ -133,7 +135,7 @@ impl LocalStore {
         Ok(LocalMutation {
             id: mutation_id,
             skill_id: skill_id.to_owned(),
-            local_sequence: local_sequence.try_into().unwrap_or(u64::MAX),
+            local_sequence: local_sequence_value,
             operation: MutationOperation::Delete,
             base_revision,
             payload_hash,
@@ -236,6 +238,14 @@ fn next_local_sequence(
         .map_err(Into::into)
 }
 
+fn checked_local_sequence(value: i64, mutation_id: &str) -> Result<u64, LocalStoreError> {
+    value.try_into().map_err(|_| {
+        LocalStoreError::InvalidPersistedState(format!(
+            "invalid mutation local_sequence {value} for {mutation_id}"
+        ))
+    })
+}
+
 fn read_dispatchable(
     connection: &rusqlite::Connection,
     limit: u32,
@@ -307,12 +317,7 @@ struct RawMutation {
 
 impl RawMutation {
     fn into_local(self) -> Result<LocalMutation, LocalStoreError> {
-        let local_sequence = self.local_sequence.try_into().map_err(|_| {
-            LocalStoreError::InvalidPersistedState(format!(
-                "invalid mutation local_sequence {} for {}",
-                self.local_sequence, self.id
-            ))
-        })?;
+        let local_sequence = checked_local_sequence(self.local_sequence, &self.id)?;
         Ok(LocalMutation {
             id: self.id,
             skill_id: self.skill_id,

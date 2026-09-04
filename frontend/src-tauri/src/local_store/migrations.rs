@@ -2,7 +2,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use super::LocalStoreError;
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 2;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 3;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -111,6 +111,84 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         INSERT INTO local_cache_policy(id, max_bytes)
         VALUES (1, 2147483648);
+        "#,
+    ),
+    (
+        3,
+        r#"
+        CREATE TABLE local_mutations_v3 (
+            id TEXT PRIMARY KEY NOT NULL,
+            skill_id TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL CHECK (local_sequence > 0),
+            operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'delete')),
+            base_revision INTEGER CHECK (base_revision IS NULL OR base_revision >= 0),
+            payload_hash TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (
+                state IN (
+                    'pending', 'in_flight', 'acked', 'retryable_error', 'conflict',
+                    'permission_denied', 'permanent_error'
+                )
+            ),
+            retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+            next_attempt_at TEXT,
+            last_attempt_at TEXT,
+            server_error_code TEXT,
+            server_error_details TEXT,
+            acknowledged_remote_revision INTEGER CHECK (
+                acknowledged_remote_revision IS NULL OR acknowledged_remote_revision >= 0
+            ),
+            acknowledged_remote_id TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(skill_id, local_sequence),
+            FOREIGN KEY(skill_id) REFERENCES local_skills(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO local_mutations_v3(
+            id, skill_id, local_sequence, operation, base_revision, payload_hash,
+            state, retry_count, last_error, created_at, updated_at
+        )
+        SELECT
+            id,
+            skill_id,
+            ROW_NUMBER() OVER (
+                PARTITION BY skill_id
+                ORDER BY created_at ASC, id ASC
+            ),
+            operation,
+            base_revision,
+            payload_hash,
+            state,
+            retry_count,
+            last_error,
+            created_at,
+            updated_at
+        FROM local_mutations;
+
+        DROP TABLE local_mutations;
+        ALTER TABLE local_mutations_v3 RENAME TO local_mutations;
+
+        CREATE INDEX idx_local_mutations_dispatch
+            ON local_mutations(state, next_attempt_at, created_at, id);
+        CREATE INDEX idx_local_mutations_skill
+            ON local_mutations(skill_id, local_sequence);
+
+        CREATE TABLE local_sync_state (
+            id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+            protocol_version INTEGER NOT NULL CHECK (protocol_version >= 1),
+            client_instance_id TEXT,
+            device_id TEXT,
+            server_user_id TEXT,
+            server_cursor TEXT,
+            last_successful_push_at TEXT,
+            last_successful_pull_at TEXT,
+            last_server_error TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        INSERT INTO local_sync_state(id, protocol_version)
+        VALUES (1, 1);
         "#,
     ),
 ];

@@ -2,8 +2,9 @@
 
 Last updated: 2026-09-04
 Scope: entire repository
-Primary development branch: `feat/desktop-foundation`
-Draft PR: #3
+Integration base: `main`
+Recommended continuation branch: `feat/m2-sync`
+Historical integration PR: #3 (merged)
 
 This file is the mandatory entry point for any local coding agent taking over SkillHive development.
 
@@ -12,15 +13,18 @@ This file is the mandatory entry point for any local coding agent taking over Sk
 Before changing code, read in this order:
 
 1. `AGENTS.md` — non-negotiable engineering constraints.
-2. `docs/development/LOCAL_AGENT_HANDOFF.md` — current implementation status and next work.
-3. `docs/development/LOCAL_VALIDATION_CHECKLIST.md` — local verification procedure.
-4. `docs/architecture/m2-cloud-sync-plan.md` — M2 protocol/architecture design.
-5. `docs/architecture/desktop-enterprise-roadmap.md` — long-term architecture roadmap.
-6. Relevant source code, migrations and tests.
+2. `docs/development/CURRENT_STATUS.md` — current branch/PR/milestone state.
+3. `docs/development/LOCAL_AGENT_HANDOFF.md` — complete implementation history and forward plan.
+4. `docs/development/LOCAL_VALIDATION_CHECKLIST.md` — local verification procedure.
+5. `docs/architecture/m2-cloud-sync-plan.md` — M2 protocol/architecture design.
+6. `docs/architecture/desktop-enterprise-roadmap.md` — long-term architecture roadmap.
+7. Relevant source code, migrations and tests.
 
 If sources disagree, use this precedence:
 
-**current source code + migrations > LOCAL_AGENT_HANDOFF > architecture plans > historical README/makewiki/docs**.
+**current source code + migrations > CURRENT_STATUS > LOCAL_AGENT_HANDOFF > architecture plans > historical README/makewiki/docs**.
+
+The first metadata paragraphs in `LOCAL_AGENT_HANDOFF.md` were captured before PR #3 was merged. For current branch/PR state, `CURRENT_STATUS.md` is authoritative.
 
 Do not infer implementation state from old documentation. The repository was intentionally analyzed and refactored from code, not from README claims.
 
@@ -202,7 +206,7 @@ At handoff:
 - M2.2–M2.7 (#7–#12): planned.
 - M3/M4: planned.
 
-See `docs/development/LOCAL_AGENT_HANDOFF.md` for exact details.
+See `docs/development/CURRENT_STATUS.md` and `docs/development/LOCAL_AGENT_HANDOFF.md` for exact details.
 
 ## 9. Immediate next task
 
@@ -284,15 +288,18 @@ If repository/toolchain details make a command invalid, fix the documented comma
 
 ## 12. Git/branch rules
 
-- Continue work on `feat/desktop-foundation` unless the owner explicitly asks for another branch.
-- Do not directly rewrite `main`.
-- Keep PR #3 as the integration PR until the owner decides otherwise.
+- PR #3 has already been merged into `main`.
+- Always fetch/pull latest `main` before starting the takeover.
+- Use `feat/m2-sync` as the recommended continuation branch, or create another focused branch from current `main` if the owner/local workflow prefers it.
+- Do not continue new work on the historical `feat/desktop-foundation` branch.
+- Do not directly develop on `main`.
 - Prefer focused commits with one correctness concern per commit.
 - Do not squash away useful migration/history checkpoints before local validation.
+- Before opening a follow-up PR, make sure the branch is based on current `main` and is not carrying accidental divergence.
 
 ## 13. Files/directories not to commit
 
-Follow `.gitignore`.
+Follow `.gitignore` and `.dockerignore`.
 
 Never commit:
 
@@ -347,6 +354,7 @@ Do not introduce these prematurely:
 When completing a work package:
 
 1. update the relevant GitHub issue status;
-2. update `docs/development/LOCAL_AGENT_HANDOFF.md` milestone table and known risks;
-3. update `docs/development/LOCAL_VALIDATION_CHECKLIST.md` if new failure modes exist;
-4. keep `AGENTS.md` stable unless a project-level invariant changes.
+2. update `docs/development/CURRENT_STATUS.md`;
+3. update `docs/development/LOCAL_AGENT_HANDOFF.md` milestone table and known risks when detailed plan/state changes;
+4. update `docs/development/LOCAL_VALIDATION_CHECKLIST.md` if new failure modes exist;
+5. keep `AGENTS.md` stable unless a project-level invariant changes.

@@ -8,14 +8,46 @@ use super::{
 };
 
 impl LocalStore {
+    /// Creates or updates an Agent profile.
+    ///
+    /// Once a profile owns one or more deployment records, its filesystem root
+    /// is immutable. Moving a root behind the deployment catalog would orphan
+    /// active material and make revocation/reconciliation target the wrong
+    /// directory. Callers must explicitly uninstall/migrate deployments first.
     pub fn upsert_agent_profile(
         &self,
         profile: UpsertAgentProfile,
     ) -> Result<AgentProfileRecord, LocalStoreError> {
         validate_agent_profile(&profile)?;
         let skill_root = path_to_string(&profile.skill_root)?;
-        let connection = self.lock_connection()?;
-        connection.execute(
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let existing: Option<(String, i64)> = transaction
+            .query_row(
+                r#"
+                SELECT p.skill_root,
+                       (SELECT COUNT(*) FROM skill_deployments d WHERE d.agent_profile_id = p.id)
+                FROM agent_profiles p
+                WHERE p.id = ?1
+                "#,
+                [profile.id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        if let Some((existing_root, deployment_count)) = existing {
+            if existing_root != skill_root && deployment_count > 0 {
+                return Err(LocalStoreError::AgentProfileRootInUse {
+                    profile_id: profile.id.clone(),
+                    current_root: PathBuf::from(existing_root),
+                    requested_root: profile.skill_root.clone(),
+                    deployment_count: deployment_count.try_into().unwrap_or(u64::MAX),
+                });
+            }
+        }
+
+        transaction.execute(
             r#"
             INSERT INTO agent_profiles(
                 id, descriptor_id, display_name, skill_root, enabled, is_custom, updated_at
@@ -37,6 +69,7 @@ impl LocalStore {
                 profile.is_custom,
             ],
         )?;
+        transaction.commit()?;
 
         Ok(AgentProfileRecord {
             id: profile.id,
@@ -46,6 +79,34 @@ impl LocalStore {
             enabled: profile.enabled,
             is_custom: profile.is_custom,
         })
+    }
+
+    pub fn get_agent_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<AgentProfileRecord>, LocalStoreError> {
+        let connection = self.lock_connection()?;
+        connection
+            .query_row(
+                r#"
+                SELECT id, descriptor_id, display_name, skill_root, enabled, is_custom
+                FROM agent_profiles
+                WHERE id = ?1
+                "#,
+                [profile_id],
+                |row| {
+                    Ok(AgentProfileRecord {
+                        id: row.get(0)?,
+                        descriptor_id: row.get(1)?,
+                        display_name: row.get(2)?,
+                        skill_root: PathBuf::from(row.get::<_, String>(3)?),
+                        enabled: row.get(4)?,
+                        is_custom: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn list_agent_profiles(&self) -> Result<Vec<AgentProfileRecord>, LocalStoreError> {
@@ -183,6 +244,40 @@ impl LocalStore {
         })
         .transpose()
     }
+
+    pub fn list_deployments(&self) -> Result<Vec<SkillDeploymentRecord>, LocalStoreError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection.prepare(
+            r#"
+            SELECT skill_id, agent_profile_id, deployed_blob_hash, target_path,
+                   state, last_error
+            FROM skill_deployments
+            ORDER BY skill_id ASC, agent_profile_id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(SkillDeploymentRecord {
+                skill_id: row.0,
+                agent_profile_id: row.1,
+                deployed_blob_hash: row.2,
+                target_path: PathBuf::from(row.3),
+                state: DeploymentState::from_db_str(&row.4)?,
+                last_error: row.5,
+            })
+        })
+        .collect()
+    }
 }
 
 fn validate_agent_profile(profile: &UpsertAgentProfile) -> Result<(), LocalStoreError> {
@@ -227,20 +322,24 @@ mod tests {
         (temp, store)
     }
 
-    #[test]
-    fn profile_and_deployment_are_persisted() {
-        let (temp, store) = store_with_skill();
-        let root = temp.path().join("claude-skills");
-        let profile = store
+    fn persist_profile(store: &LocalStore, root: PathBuf) -> AgentProfileRecord {
+        store
             .upsert_agent_profile(UpsertAgentProfile {
                 id: "claude-code:default".to_owned(),
                 descriptor_id: "claude-code".to_owned(),
                 display_name: "Claude Code".to_owned(),
-                skill_root: root.clone(),
+                skill_root: root,
                 enabled: true,
                 is_custom: false,
             })
-            .expect("profile");
+            .expect("profile")
+    }
+
+    #[test]
+    fn profile_and_deployment_are_persisted() {
+        let (temp, store) = store_with_skill();
+        let root = temp.path().join("claude-skills");
+        let profile = persist_profile(&store, root.clone());
         assert_eq!(profile.skill_root, root);
 
         let deployment = store
@@ -286,5 +385,34 @@ mod tests {
             last_error: None,
         });
         assert!(matches!(result, Err(LocalStoreError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn profile_root_cannot_move_while_deployments_exist() {
+        let (temp, store) = store_with_skill();
+        let profile = persist_profile(&store, temp.path().join("first-root"));
+        store
+            .record_deployment(RecordDeployment {
+                skill_id: "skill-1".to_owned(),
+                agent_profile_id: profile.id.clone(),
+                deployed_blob_hash: "sha256:abc".to_owned(),
+                target_path: profile.skill_root.join("code-review"),
+                state: DeploymentState::Installed,
+                last_error: None,
+            })
+            .expect("deployment");
+
+        let result = store.upsert_agent_profile(UpsertAgentProfile {
+            id: profile.id,
+            descriptor_id: profile.descriptor_id,
+            display_name: profile.display_name,
+            skill_root: temp.path().join("second-root"),
+            enabled: true,
+            is_custom: false,
+        });
+        assert!(matches!(
+            result,
+            Err(LocalStoreError::AgentProfileRootInUse { .. })
+        ));
     }
 }

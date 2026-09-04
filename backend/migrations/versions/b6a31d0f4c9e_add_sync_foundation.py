@@ -47,13 +47,21 @@ def upgrade() -> None:
             "sync_revision",
             existing_type=sa.BigInteger(),
             nullable=False,
-            server_default=sa.text("0"),
+            server_default=sa.text("1"),
+        )
+        batch.create_check_constraint(
+            "ck_skill_sync_revision_positive",
+            "sync_revision >= 1",
         )
     with op.batch_alter_table("skill_versions") as batch:
         batch.alter_column("revision", existing_type=sa.BigInteger(), nullable=False)
         batch.create_unique_constraint(
             "uq_skill_version_revision",
             ["skill_id", "revision"],
+        )
+        batch.create_check_constraint(
+            "ck_skill_version_revision_positive",
+            "revision >= 1",
         )
         batch.create_check_constraint(
             "ck_skill_version_package_size_nonnegative",
@@ -111,8 +119,8 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=36), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
-            "result_revision IS NULL OR result_revision >= 0",
-            name="ck_sync_receipt_revision_nonnegative",
+            "result_revision IS NULL OR result_revision >= 1",
+            name="ck_sync_receipt_revision_positive",
         ),
         sa.ForeignKeyConstraint(["device_id"], ["devices.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
@@ -155,8 +163,8 @@ def upgrade() -> None:
         sa.Column("metadata_payload", sa.JSON(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
-            "resource_revision >= 0",
-            name="ck_sync_change_revision_nonnegative",
+            "resource_revision >= 1",
+            name="ck_sync_change_revision_positive",
         ),
         sa.ForeignKeyConstraint(["owner_user_id"], ["users.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("sequence"),
@@ -200,11 +208,13 @@ def downgrade() -> None:
 
     with op.batch_alter_table("skill_versions") as batch:
         batch.drop_constraint("ck_skill_version_package_size_nonnegative", type_="check")
+        batch.drop_constraint("ck_skill_version_revision_positive", type_="check")
         batch.drop_constraint("uq_skill_version_revision", type_="unique")
         batch.drop_column("package_size_bytes")
         batch.drop_column("package_manifest_hash")
         batch.drop_column("revision")
     with op.batch_alter_table("skills") as batch:
+        batch.drop_constraint("ck_skill_sync_revision_positive", type_="check")
         batch.drop_column("current_package_hash")
         batch.drop_column("sync_revision")
 

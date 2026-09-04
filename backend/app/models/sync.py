@@ -1,7 +1,17 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, utc_now
@@ -31,10 +41,14 @@ class Device(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class SkillBlobObject(Base):
     __tablename__ = "skill_blob_objects"
+    __table_args__ = (
+        CheckConstraint("size_bytes >= 0", name="ck_skill_blob_size_nonnegative"),
+        UniqueConstraint("storage_key", name="uq_skill_blob_storage_key"),
+    )
 
     hash: Mapped[str] = mapped_column(String(71), primary_key=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    storage_key: Mapped[str] = mapped_column(String(1000), nullable=False, unique=True)
+    storage_key: Mapped[str] = mapped_column(String(1000), nullable=False)
     storage_backend: Mapped[str] = mapped_column(String(40), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -52,6 +66,10 @@ class SyncMutationReceipt(UUIDPrimaryKeyMixin, Base):
             "device_id",
             "mutation_id",
             name="uq_sync_receipt_user_device_mutation",
+        ),
+        CheckConstraint(
+            "result_revision IS NULL OR result_revision >= 1",
+            name="ck_sync_receipt_revision_positive",
         ),
         Index("ix_sync_receipt_resource", "resource_type", "resource_id"),
     )
@@ -82,6 +100,10 @@ class SyncMutationReceipt(UUIDPrimaryKeyMixin, Base):
 class SyncChangeLog(Base):
     __tablename__ = "sync_change_log"
     __table_args__ = (
+        CheckConstraint(
+            "resource_revision >= 1",
+            name="ck_sync_change_revision_positive",
+        ),
         Index("ix_sync_change_resource", "resource_type", "resource_id", "resource_revision"),
         Index("ix_sync_change_owner_sequence", "owner_user_id", "sequence"),
     )

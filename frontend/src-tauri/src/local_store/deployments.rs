@@ -5,6 +5,8 @@ use std::{
 
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
+use crate::agent::validate_persisted_profile;
+
 use super::{
     path_to_string, validate_non_empty, AgentProfileRecord, DeploymentState, LocalStore,
     LocalStoreError, RecordDeployment, SkillDeploymentRecord, UpsertAgentProfile,
@@ -279,6 +281,13 @@ fn validate_agent_profile(profile: &UpsertAgentProfile) -> Result<(), LocalStore
         validate_non_empty(field, value)?;
     }
     validate_stable_absolute_path(&profile.skill_root, "agent skill_root")?;
+    validate_persisted_profile(
+        &profile.id,
+        &profile.descriptor_id,
+        &profile.skill_root,
+        profile.is_custom,
+    )
+    .map_err(|error| LocalStoreError::InvalidInput(error.to_string()))?;
 
     match fs::symlink_metadata(&profile.skill_root) {
         Ok(metadata) => {
@@ -347,12 +356,12 @@ mod tests {
     fn persist_profile(store: &LocalStore, root: PathBuf) -> AgentProfileRecord {
         store
             .upsert_agent_profile(UpsertAgentProfile {
-                id: "claude-code:default".to_owned(),
-                descriptor_id: "claude-code".to_owned(),
-                display_name: "Claude Code".to_owned(),
+                id: "custom:test:configured".to_owned(),
+                descriptor_id: "custom:test".to_owned(),
+                display_name: "Test Agent".to_owned(),
                 skill_root: root,
                 enabled: true,
-                is_custom: false,
+                is_custom: true,
             })
             .expect("profile")
     }
@@ -360,7 +369,7 @@ mod tests {
     #[test]
     fn profile_and_deployment_are_persisted() {
         let (temp, store) = store_with_skill();
-        let root = temp.path().join("claude-skills");
+        let root = temp.path().join("agent-skills");
         let profile = persist_profile(&store, root.clone());
         assert_eq!(profile.skill_root, root);
 
@@ -398,11 +407,25 @@ mod tests {
             display_name: profile.display_name,
             skill_root: temp.path().join("second-root"),
             enabled: true,
-            is_custom: false,
+            is_custom: true,
         });
         assert!(matches!(
             result,
             Err(LocalStoreError::AgentProfileRootInUse { .. })
         ));
+    }
+
+    #[test]
+    fn forged_builtin_root_is_rejected_before_persistence() {
+        let (temp, store) = store_with_skill();
+        let result = store.upsert_agent_profile(UpsertAgentProfile {
+            id: "claude-code:default".to_owned(),
+            descriptor_id: "claude-code".to_owned(),
+            display_name: "Claude Code".to_owned(),
+            skill_root: temp.path().join("forged"),
+            enabled: true,
+            is_custom: false,
+        });
+        assert!(matches!(result, Err(LocalStoreError::InvalidInput(_))));
     }
 }

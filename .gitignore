@@ -17,17 +17,33 @@ htmlcov/
 .uv-cache/
 .pnpm-store/
 
-# Environment and data
+# Environment, secrets, and local data
 .env
 .env.*
 !.env.example
+.secrets/
+secrets.local/
+*.key
+*.p12
+*.pfx
 data/*
 !data/.gitkeep
+*.db
 *.db-journal
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+
+# SkillHive local desktop runtime/state
+.skillhive/
+.skillhive-local/
+.skillhive-runtime/
+frontend/src-tauri/.skillhive/
+frontend/src-tauri/.runtime/
 
 # Frontend
 frontend/node_modules/
@@ -36,6 +52,15 @@ frontend/coverage/
 frontend/.vite/
 frontend/.eslintcache
 *.tsbuildinfo
+
+# Rust / Tauri build output
+/target/
+frontend/src-tauri/target/
+*.pdb
+*.dSYM/
+
+# Keep Cargo.lock versioned for reproducible application builds.
+# Do not add Cargo.lock to ignore rules.
 
 # Editors and operating systems
 .idea/

@@ -320,8 +320,15 @@ pub enum LocalStoreError {
     SkillNotFound(String),
     #[error("agent profile not found: {0}")]
     AgentProfileNotFound(String),
-    #[error("outbox mutation claim was lost for id {0}")]
-    OutboxClaimLost(String),
+    #[error(
+        "agent profile {profile_id} cannot move from {current_root:?} to {requested_root:?} while {deployment_count} deployments exist"
+    )]
+    AgentProfileRootInUse {
+        profile_id: String,
+        current_root: PathBuf,
+        requested_root: PathBuf,
+        deployment_count: u64,
+    },
     #[error("path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),
 }

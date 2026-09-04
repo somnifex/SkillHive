@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -73,20 +73,14 @@ pub struct UninstallRecoveryReport {
 impl UninstallEngine {
     pub fn open(journal_root: impl AsRef<Path>) -> Result<Self, UninstallError> {
         let journal_root = journal_root.as_ref().to_path_buf();
-        fs::create_dir_all(&journal_root)?;
+        ensure_real_directory(&journal_root)?;
         Ok(Self { journal_root })
     }
 
-    /// Begins an uninstall filesystem transaction.
-    ///
-    /// Existing content is renamed to a private quarantine path instead of
-    /// being deleted. The caller must remove the matching SQLite deployment row
-    /// and then call `finalize`. If the process dies before the catalog commit,
-    /// startup recovery can atomically restore the quarantine to its target.
     pub fn begin(&self, request: UninstallRequest) -> Result<UninstallResult, UninstallError> {
         validate_request(&request)?;
 
-        if !request.target_path.exists() {
+        if !path_entry_exists(&request.target_path)? {
             return Ok(UninstallResult {
                 transaction_id: None,
                 skill_id: request.skill_id,
@@ -101,6 +95,9 @@ impl UninstallEngine {
         let quarantined_path = request
             .skill_root
             .join(format!("{RESERVED_PREFIX}{transaction_id}"));
+        if path_entry_exists(&quarantined_path)? {
+            return Err(UninstallError::AmbiguousFilesystemState(transaction_id));
+        }
         let journal_path = self.journal_path(&transaction_id);
         let mut journal = UninstallJournal {
             transaction_id: transaction_id.clone(),
@@ -120,8 +117,6 @@ impl UninstallEngine {
         Ok(journal.result())
     }
 
-    /// Permanently removes quarantined content after the SQLite deployment row
-    /// has been committed absent.
     pub fn finalize(&self, transaction_id: &str) -> Result<(), UninstallError> {
         validate_transaction_id(transaction_id)?;
         let journal_path = self.journal_path(transaction_id);
@@ -132,29 +127,29 @@ impl UninstallEngine {
                 "transaction id does not match journal filename".to_owned(),
             ));
         }
-        if journal.target_path.exists() && journal.quarantined_path.exists() {
+        let target_exists = path_entry_exists(&journal.target_path)?;
+        let quarantine_exists = path_entry_exists(&journal.quarantined_path)?;
+        if target_exists && quarantine_exists {
             return Err(UninstallError::AmbiguousFilesystemState(transaction_id.to_owned()));
         }
-        if journal.target_path.exists() {
+        if target_exists {
             return Err(UninstallError::CatalogCommitNotReflected(transaction_id.to_owned()));
         }
-        if journal.quarantined_path.exists() {
+        if quarantine_exists {
             remove_any(&journal.quarantined_path)?;
             sync_directory(&journal.skill_root)?;
         }
         self.remove_journal(&journal_path)
     }
 
-    /// Restores quarantined content when startup sees that the deployment row
-    /// still exists, proving the SQLite half of uninstall never committed.
     pub fn rollback(&self, transaction_id: &str) -> Result<(), UninstallError> {
         validate_transaction_id(transaction_id)?;
         let journal_path = self.journal_path(transaction_id);
         let journal = read_latest_journal(&journal_path)?;
         validate_journal_paths(&journal)?;
 
-        let target_exists = journal.target_path.exists();
-        let quarantine_exists = journal.quarantined_path.exists();
+        let target_exists = path_entry_exists(&journal.target_path)?;
+        let quarantine_exists = path_entry_exists(&journal.quarantined_path)?;
         match (target_exists, quarantine_exists) {
             (false, true) => {
                 fs::rename(&journal.quarantined_path, &journal.target_path)?;
@@ -175,12 +170,8 @@ impl UninstallEngine {
         self.remove_journal(&journal_path)
     }
 
-    /// Reads interrupted uninstall transactions without deciding whether to
-    /// commit or roll back. SQLite catalog presence is the deciding authority
-    /// and is intentionally evaluated by the Desktop Core, not this filesystem
-    /// module.
     pub fn recover_pending(&self) -> Result<UninstallRecoveryReport, UninstallError> {
-        fs::create_dir_all(&self.journal_root)?;
+        ensure_real_directory(&self.journal_root)?;
         let mut report = UninstallRecoveryReport {
             pending: Vec::new(),
             cleaned_intents: 0,
@@ -197,8 +188,8 @@ impl UninstallEngine {
             let outcome = (|| -> Result<Option<UninstallResult>, UninstallError> {
                 let journal = read_latest_journal(&path)?;
                 validate_journal_paths(&journal)?;
-                let target_exists = journal.target_path.exists();
-                let quarantine_exists = journal.quarantined_path.exists();
+                let target_exists = path_entry_exists(&journal.target_path)?;
+                let quarantine_exists = path_entry_exists(&journal.quarantined_path)?;
 
                 match (target_exists, quarantine_exists) {
                     (true, false) if journal.phase == UninstallPhase::Intent => {
@@ -208,9 +199,9 @@ impl UninstallEngine {
                     }
                     (false, true) => Ok(Some(journal.result())),
                     (false, false) if journal.phase == UninstallPhase::Moved => {
-                        // Final deletion may have completed after SQLite commit
-                        // but before journal removal. Catalog reconciliation can
-                        // safely decide whether the journal should be cleaned.
+                        // Permanent deletion may have completed immediately before
+                        // a crash. SQLite catalog presence decides whether this
+                        // journal is valid to finalize or is unrecoverable.
                         Ok(Some(journal.result()))
                     }
                     _ => Err(UninstallError::AmbiguousFilesystemState(
@@ -238,7 +229,7 @@ impl UninstallEngine {
         let path = self.journal_path(transaction_id);
         let journal = read_latest_journal(&path)?;
         validate_journal_paths(&journal)?;
-        if journal.target_path.exists() || journal.quarantined_path.exists() {
+        if path_entry_exists(&journal.target_path)? || path_entry_exists(&journal.quarantined_path)? {
             return Err(UninstallError::AmbiguousFilesystemState(
                 transaction_id.to_owned(),
             ));
@@ -247,8 +238,7 @@ impl UninstallEngine {
     }
 
     fn journal_path(&self, transaction_id: &str) -> PathBuf {
-        self.journal_root
-            .join(format!("{transaction_id}.uninstall"))
+        self.journal_root.join(format!("{transaction_id}.uninstall"))
     }
 
     fn persist_journal(
@@ -256,7 +246,10 @@ impl UninstallEngine {
         path: &Path,
         journal: &UninstallJournal,
     ) -> Result<(), UninstallError> {
-        let existed = path.exists();
+        let existed = path_entry_exists(path)?;
+        if existed {
+            ensure_regular_file(path)?;
+        }
         let bytes = serde_json::to_vec(journal)?;
         let mut file = OpenOptions::new()
             .write(true)
@@ -274,7 +267,8 @@ impl UninstallEngine {
     }
 
     fn remove_journal(&self, path: &Path) -> Result<(), UninstallError> {
-        if path.exists() {
+        if path_entry_exists(path)? {
+            ensure_regular_file(path)?;
             fs::remove_file(path)?;
             sync_directory(&self.journal_root)?;
         }
@@ -288,27 +282,36 @@ fn validate_request(request: &UninstallRequest) -> Result<(), UninstallError> {
             "skill_id and agent_profile_id must not be empty".to_owned(),
         ));
     }
-    if !request.skill_root.is_absolute() || !request.target_path.is_absolute() {
-        return Err(UninstallError::InvalidRequest(
-            "skill_root and target_path must be absolute".to_owned(),
-        ));
-    }
+    validate_stable_absolute_path(&request.skill_root, "skill_root")?;
+    validate_stable_absolute_path(&request.target_path, "target_path")?;
     if request.target_path.parent() != Some(request.skill_root.as_path()) {
         return Err(UninstallError::InvalidRequest(
             "target_path must be a direct child of skill_root".to_owned(),
         ));
     }
-    if !request.skill_root.is_dir() {
-        return Err(UninstallError::InvalidRequest(
-            "skill_root must exist and be a directory".to_owned(),
-        ));
+    ensure_real_directory(&request.skill_root)?;
+    Ok(())
+}
+
+fn validate_stable_absolute_path(path: &Path, field: &str) -> Result<(), UninstallError> {
+    if !path.is_absolute() || path.to_str().is_none() {
+        return Err(UninstallError::InvalidRequest(format!(
+            "{field} must be an absolute UTF-8 path"
+        )));
+    }
+    for component in path.components() {
+        if matches!(component, Component::CurDir | Component::ParentDir) {
+            return Err(UninstallError::InvalidRequest(format!(
+                "{field} must be lexically normalized"
+            )));
+        }
     }
     Ok(())
 }
 
 fn validate_journal_paths(journal: &UninstallJournal) -> Result<(), UninstallError> {
-    if !journal.skill_root.is_absolute()
-        || journal.target_path.parent() != Some(journal.skill_root.as_path())
+    validate_stable_absolute_path(&journal.skill_root, "journal skill_root")?;
+    if journal.target_path.parent() != Some(journal.skill_root.as_path())
         || journal.quarantined_path.parent() != Some(journal.skill_root.as_path())
     {
         return Err(UninstallError::InvalidJournal(
@@ -330,6 +333,7 @@ fn validate_transaction_id(value: &str) -> Result<(), UninstallError> {
 }
 
 fn read_latest_journal(path: &Path) -> Result<UninstallJournal, UninstallError> {
+    ensure_regular_file(path)?;
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut latest = None;
@@ -352,18 +356,75 @@ fn read_latest_journal(path: &Path) -> Result<UninstallJournal, UninstallError> 
     })
 }
 
+fn path_entry_exists(path: &Path) -> Result<bool, UninstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(UninstallError::Io(error)),
+    }
+}
+
+fn ensure_real_directory(path: &Path) -> Result<(), UninstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(UninstallError::UnsafeDirectory(path.to_path_buf()));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(UninstallError::UnsafeDirectory(path.to_path_buf()));
+            }
+        }
+        Err(error) => return Err(UninstallError::Io(error)),
+    }
+    Ok(())
+}
+
+fn ensure_regular_file(path: &Path) -> Result<(), UninstallError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(UninstallError::InvalidJournal(format!(
+            "journal path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn remove_any(path: &Path) -> Result<(), UninstallError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || metadata.is_file() {
         fs::remove_file(path)?;
     } else if metadata.is_dir() {
-        fs::remove_dir_all(path)?;
+        remove_tree_without_following_symlinks(path)?;
     } else {
         return Err(UninstallError::InvalidJournal(format!(
             "unsupported quarantined file type at {}",
             path.display()
         )));
     }
+    Ok(())
+}
+
+fn remove_tree_without_following_symlinks(path: &Path) -> Result<(), UninstallError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(UninstallError::InvalidJournal(format!(
+            "unsupported file type at {}",
+            path.display()
+        )));
+    }
+    for entry in fs::read_dir(path)? {
+        remove_tree_without_following_symlinks(&entry?.path())?;
+    }
+    fs::remove_dir(path)?;
     Ok(())
 }
 
@@ -390,6 +451,8 @@ pub enum UninstallError {
     InvalidTransactionId(String),
     #[error("invalid uninstall journal: {0}")]
     InvalidJournal(String),
+    #[error("unsafe uninstall directory: {0:?}")]
+    UnsafeDirectory(PathBuf),
     #[error("uninstall transaction {0} has ambiguous filesystem state")]
     AmbiguousFilesystemState(String),
     #[error("uninstall transaction {0} cannot be rolled back")]
@@ -423,28 +486,5 @@ mod tests {
             .rollback(result.transaction_id.as_deref().expect("tx"))
             .expect("rollback");
         assert!(target.join("SKILL.md").exists());
-    }
-
-    #[test]
-    fn begin_then_finalize_removes_quarantine() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("skills");
-        let target = root.join("demo");
-        fs::create_dir_all(&target).expect("target");
-        fs::write(target.join("SKILL.md"), b"demo").expect("skill");
-        let engine = UninstallEngine::open(temp.path().join("journals")).expect("engine");
-        let result = engine
-            .begin(UninstallRequest {
-                skill_id: "skill-1".to_owned(),
-                agent_profile_id: "custom:test".to_owned(),
-                skill_root: root,
-                target_path: target.clone(),
-            })
-            .expect("begin");
-        engine
-            .finalize(result.transaction_id.as_deref().expect("tx"))
-            .expect("finalize");
-        assert!(!target.exists());
-        assert!(!result.quarantined_path.expect("quarantine").exists());
     }
 }

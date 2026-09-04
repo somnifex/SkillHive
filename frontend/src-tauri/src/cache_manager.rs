@@ -30,16 +30,6 @@ struct BlobInventoryEntry {
     size_bytes: u64,
 }
 
-/// Enforces the local immutable blob budget using skill-level LRU ordering.
-///
-/// Correctness rules:
-/// - dirty/conflict/error/revoked/corrupted state is never evicted;
-/// - pinned skills are never evicted;
-/// - skills with a local workspace directory are treated as working and kept;
-/// - any skill with a deployment record is kept;
-/// - a skill without a remote id is never evicted;
-/// - SQLite transitions a candidate to `remote_only` before local blobs are
-///   deleted, so crashes can leak bytes but cannot lie about local availability.
 pub fn enforce_cache_budget(
     store: &LocalStore,
     blobs: &BlobStore,
@@ -47,6 +37,7 @@ pub fn enforce_cache_budget(
     let policy = store.cache_policy()?;
     let skills = store.list_cache_skills()?;
     let deployments = store.list_deployments()?;
+    let mutation_payloads = store.list_unacked_mutation_payload_hashes()?;
     let inventory = scan_blob_inventory(blobs.root())?;
     let before_bytes = inventory
         .iter()
@@ -72,22 +63,33 @@ pub fn enforce_cache_budget(
         .map(|deployment| deployment.skill_id.clone())
         .collect();
 
-    let mut snapshot_hashes = HashSet::new();
+    // Count snapshot roots, not just unique hashes. Two skills can legally share
+    // an identical immutable snapshot; an outbox mutation can also reference an
+    // older snapshot no longer current on any skill. Every reference contributes
+    // one unit so evicting one skill can never delete another owner's bytes.
+    let mut snapshot_reference_counts: HashMap<String, usize> = HashMap::new();
     for skill in &skills {
         if skill.sync_state != SkillSyncState::RemoteOnly {
-            snapshot_hashes.insert(skill.snapshot_hash.clone());
+            *snapshot_reference_counts
+                .entry(skill.snapshot_hash.clone())
+                .or_default() += 1;
         }
     }
     for deployment in &deployments {
-        snapshot_hashes.insert(deployment.deployed_blob_hash.clone());
+        *snapshot_reference_counts
+            .entry(deployment.deployed_blob_hash.clone())
+            .or_default() += 1;
+    }
+    for payload_hash in mutation_payloads {
+        *snapshot_reference_counts.entry(payload_hash).or_default() += 1;
     }
 
     let mut closures: HashMap<String, HashSet<String>> = HashMap::new();
     let mut unresolved_snapshots = HashSet::new();
-    for snapshot_hash in snapshot_hashes {
-        match snapshot_closure(blobs, &snapshot_hash) {
+    for snapshot_hash in snapshot_reference_counts.keys() {
+        match snapshot_closure(blobs, snapshot_hash) {
             Ok(closure) => {
-                closures.insert(snapshot_hash, closure);
+                closures.insert(snapshot_hash.clone(), closure);
             }
             Err(error) => {
                 unresolved_snapshots.insert(snapshot_hash.clone());
@@ -98,18 +100,16 @@ pub fn enforce_cache_budget(
         }
     }
 
-    // Reference counts make shared file blobs safe. Deleting one skill's cache
-    // cannot delete content still referenced by another snapshot/deployment.
     let mut reference_counts: HashMap<String, usize> = HashMap::new();
-    for closure in closures.values() {
+    for (snapshot_hash, snapshot_refs) in &snapshot_reference_counts {
+        let Some(closure) = closures.get(snapshot_hash) else {
+            continue;
+        };
         for hash in closure {
-            *reference_counts.entry(hash.clone()).or_default() += 1;
+            *reference_counts.entry(hash.clone()).or_default() += *snapshot_refs;
         }
     }
 
-    // Oldest access first. The SQL query already orders this way, but sorting
-    // again keeps this function correct if the persistence implementation later
-    // changes its output order.
     let mut candidates = skills;
     candidates.sort_by(|left, right| {
         left.last_accessed_at
@@ -140,8 +140,6 @@ pub fn enforce_cache_budget(
             continue;
         };
 
-        // Recheck the workspace immediately before the durable DB claim. The
-        // manager never removes workspaces, even if one appears after this check.
         if skill.workspace_path.exists() {
             report.skipped_skills.push(skill.skill_id);
             continue;
@@ -179,9 +177,8 @@ pub fn enforce_cache_budget(
         }
     }
 
-    // Only sweep unreferenced orphan blobs when every referenced manifest was
-    // understood. Otherwise an unresolved/corrupt manifest could make live file
-    // blobs look orphaned and an aggressive sweep would compound the damage.
+    // Orphan sweeping is intentionally disabled if even one referenced manifest
+    // is unreadable. In that state we cannot prove which file blobs are live.
     if report.after_bytes > policy.max_bytes && unresolved_snapshots.is_empty() {
         let referenced: HashSet<&str> = reference_counts
             .iter()
@@ -333,7 +330,7 @@ pub enum CacheManagerError {
     Snapshot(#[from] SnapshotError),
     #[error("cache size overflow")]
     SizeOverflow,
-    #[error("blob inventory path mismatch for {hash}: expected {expected}, got {actual}")]
+    #[error("blob inventory path mismatch for {hash}: expected {expected:?}, got {actual:?}")]
     InventoryPathMismatch {
         hash: String,
         expected: PathBuf,

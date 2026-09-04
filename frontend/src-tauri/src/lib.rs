@@ -7,6 +7,7 @@ pub mod local_store;
 pub mod skill_snapshot;
 pub mod snapshot_verifier;
 pub mod sync;
+pub mod uninstall;
 
 use std::{path::PathBuf, sync::Mutex};
 
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotPolicy};
 use snapshot_verifier::verify_materialized_snapshot;
 use tauri::Manager;
+use uninstall::{UninstallEngine, UninstallRequest};
 
 #[derive(Debug, Default)]
 pub struct DesktopMutationCoordinator {
@@ -30,10 +32,20 @@ pub struct DesktopMutationCoordinator {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct UninstallStartupReport {
+    pub discovered: usize,
+    pub rolled_back: usize,
+    pub finalized: usize,
+    pub cleaned_intents: usize,
+    pub failed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DesktopStartupStatus {
     pub local_store: LocalStoreHealth,
     pub recovered_in_flight_mutations: u64,
     pub deployment_recovery: RecoveryReport,
+    pub uninstall_recovery: UninstallStartupReport,
     pub agent_reconciliation_errors: Vec<String>,
     pub cache_enforcement: Option<CacheEnforcementReport>,
     pub cache_error: Option<String>,
@@ -83,8 +95,24 @@ pub struct DeploySkillToAgentRequest {
 #[serde(rename_all = "camelCase")]
 pub struct DeploySkillToAgentResult {
     pub deployment: SkillDeploymentRecord,
-    /// True only when filesystem + SQLite are correct but journal cleanup failed.
-    /// Startup recovery will retry cleanup without repeating deployment.
+    pub recovery_pending: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallSkillFromAgentRequest {
+    pub skill_id: String,
+    pub agent_profile_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallSkillFromAgentResult {
+    pub skill_id: String,
+    pub agent_profile_id: String,
+    pub target_existed: bool,
+    /// True when SQLite is already correct but quarantine/journal cleanup must
+    /// be retried by startup recovery.
     pub recovery_pending: bool,
 }
 
@@ -135,12 +163,6 @@ fn save_agent_profile(
         .map_err(|error| error.to_string())
 }
 
-/// The only WebView-facing path for committing a mutable workspace.
-///
-/// The WebView never supplies `blob_hash`. The privileged core captures an
-/// immutable snapshot first, then commits the local skill row and durable outbox
-/// mutation in one SQLite transaction. Orphan blobs after a DB failure are safe
-/// and later reclaimable by CacheManager.
 #[tauri::command]
 fn commit_local_skill_workspace(
     coordinator: tauri::State<'_, DesktopMutationCoordinator>,
@@ -238,9 +260,6 @@ fn deploy_skill_to_agent(
         )
         .map_err(|error| error.to_string())?;
 
-    // A directory existing at the target path is not sufficient evidence of a
-    // successful deployment. Verify every path, size and content hash before the
-    // durable catalog is allowed to claim the deployment is installed.
     verify_materialized_snapshot(
         &blobs,
         &filesystem_result.snapshot_hash,
@@ -265,6 +284,69 @@ fn deploy_skill_to_agent(
 
     Ok(DeploySkillToAgentResult {
         deployment: catalog,
+        recovery_pending,
+    })
+}
+
+#[tauri::command]
+fn uninstall_skill_from_agent(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    uninstall_engine: tauri::State<'_, UninstallEngine>,
+    request: UninstallSkillFromAgentRequest,
+) -> Result<UninstallSkillFromAgentResult, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+
+    let deployment = store
+        .get_deployment(&request.skill_id, &request.agent_profile_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "deployment not found for skill {} and profile {}",
+                request.skill_id, request.agent_profile_id
+            )
+        })?;
+    let profile = store
+        .get_agent_profile(&request.agent_profile_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("agent profile not found: {}", request.agent_profile_id))?;
+    if deployment.target_path.parent() != Some(profile.skill_root.as_path()) {
+        return Err("deployment catalog target no longer matches agent profile root".to_owned());
+    }
+
+    let filesystem = uninstall_engine
+        .begin(UninstallRequest {
+            skill_id: deployment.skill_id.clone(),
+            agent_profile_id: deployment.agent_profile_id.clone(),
+            skill_root: profile.skill_root,
+            target_path: deployment.target_path.clone(),
+        })
+        .map_err(|error| error.to_string())?;
+
+    // The guarded delete matches both path and snapshot hash. On any DB error,
+    // leave the uninstall journal intact; startup reads the authoritative catalog
+    // and chooses rollback vs finalize instead of guessing whether commit landed.
+    store
+        .remove_deployment_catalog(
+            &deployment.skill_id,
+            &deployment.agent_profile_id,
+            &deployment.deployed_blob_hash,
+            &deployment.target_path,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let recovery_pending = filesystem
+        .transaction_id
+        .as_deref()
+        .is_some_and(|transaction_id| uninstall_engine.finalize(transaction_id).is_err());
+
+    Ok(UninstallSkillFromAgentResult {
+        skill_id: deployment.skill_id,
+        agent_profile_id: deployment.agent_profile_id,
+        target_existed: filesystem.target_existed,
         recovery_pending,
     })
 }
@@ -343,9 +425,6 @@ fn discover_and_reconcile_agents(
         }
     }
 
-    // Persisted custom profiles are configuration, not heuristic discovery. They
-    // remain visible even when the directory does not exist yet so the user can
-    // create/repair the target without source-code changes.
     for profile in store
         .list_agent_profiles()?
         .into_iter()
@@ -395,6 +474,44 @@ fn append_discovery_error(result: &mut AgentDiscoveryResult, error: String) {
     }
 }
 
+fn reconcile_uninstall_recovery(
+    store: &LocalStore,
+    engine: &UninstallEngine,
+) -> Result<UninstallStartupReport, String> {
+    let discovered = engine.recover_pending().map_err(|error| error.to_string())?;
+    let mut report = UninstallStartupReport {
+        discovered: discovered.pending.len(),
+        rolled_back: 0,
+        finalized: 0,
+        cleaned_intents: discovered.cleaned_intents,
+        failed: discovered.failed,
+    };
+
+    for pending in discovered.pending {
+        let Some(transaction_id) = pending.transaction_id.as_deref() else {
+            continue;
+        };
+        match store.get_deployment(&pending.skill_id, &pending.agent_profile_id) {
+            Ok(Some(_)) => match engine.rollback(transaction_id) {
+                Ok(()) => report.rolled_back += 1,
+                Err(error) => report.failed.push(format!(
+                    "uninstall rollback failed for {transaction_id}: {error}"
+                )),
+            },
+            Ok(None) => match engine.finalize(transaction_id) {
+                Ok(()) => report.finalized += 1,
+                Err(error) => report.failed.push(format!(
+                    "uninstall finalize failed for {transaction_id}: {error}"
+                )),
+            },
+            Err(error) => report.failed.push(format!(
+                "uninstall catalog lookup failed for {transaction_id}: {error}"
+            )),
+        }
+    }
+    Ok(report)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -404,10 +521,9 @@ pub fn run() {
             let recovered_in_flight_mutations = store.recover_in_flight_mutations()?;
             let blobs = BlobStore::open(data_dir.join("blobs"))?;
             let deployment = DeploymentEngine::open(data_dir.join("deployment-journal"))?;
+            let uninstall = UninstallEngine::open(data_dir.join("uninstall-journal"))?;
             let mut deployment_recovery = deployment.recover_incomplete()?;
 
-            // Filesystem recovery may complete activation before SQLite knew the
-            // final state. Verify recovered content before replaying the catalog.
             for recovered in deployment_recovery.catalog_commits.clone() {
                 if let Err(error) = verify_materialized_snapshot(
                     &blobs,
@@ -447,6 +563,15 @@ pub fn run() {
                 }
             }
 
+            let uninstall_recovery = reconcile_uninstall_recovery(&store, &uninstall)
+                .unwrap_or_else(|error| UninstallStartupReport {
+                    discovered: 0,
+                    rolled_back: 0,
+                    finalized: 0,
+                    cleaned_intents: 0,
+                    failed: vec![error],
+                });
+
             let registry = AgentRegistry::builtin();
             let agent_results = discover_and_reconcile_agents(&store, &registry)?;
             let agent_reconciliation_errors = agent_results
@@ -467,12 +592,14 @@ pub fn run() {
             app.manage(store);
             app.manage(blobs);
             app.manage(deployment);
+            app.manage(uninstall);
             app.manage(registry);
             app.manage(DesktopMutationCoordinator::default());
             app.manage(DesktopStartupStatus {
                 local_store,
                 recovered_in_flight_mutations,
                 deployment_recovery,
+                uninstall_recovery,
                 agent_reconciliation_errors,
                 cache_enforcement,
                 cache_error,
@@ -486,6 +613,7 @@ pub fn run() {
             save_agent_profile,
             commit_local_skill_workspace,
             deploy_skill_to_agent,
+            uninstall_skill_from_agent,
             enforce_local_cache,
             set_local_cache_policy,
             desktop_startup_status

@@ -1,3 +1,5 @@
+pub mod import;
+
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -7,6 +9,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::{
+    blob_store::BlobStore,
+    skill_snapshot::{materialize_snapshot, SnapshotError},
+};
 
 const MAX_INITIAL_SKILL_MD_BYTES: usize = 2 * 1024 * 1024;
 
@@ -52,30 +59,62 @@ impl WorkspaceStore {
         initial_skill_md: &str,
     ) -> Result<WorkspaceRef, WorkspaceError> {
         validate_skill_id(skill_id)?;
-        if initial_skill_md.as_bytes().len() > MAX_INITIAL_SKILL_MD_BYTES {
+        if initial_skill_md.len() > MAX_INITIAL_SKILL_MD_BYTES {
             return Err(WorkspaceError::InitialSkillTooLarge {
-                size: initial_skill_md.as_bytes().len(),
+                size: initial_skill_md.len(),
                 limit: MAX_INITIAL_SKILL_MD_BYTES,
             });
         }
 
         let path = self.path_for_skill(skill_id)?;
-        if path.exists() {
-            validate_workspace_directory(&path)?;
-            let entrypoint = path.join("SKILL.md");
-            if entrypoint.exists() {
-                return Err(WorkspaceError::AlreadyExists(path));
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(WorkspaceError::InvalidWorkspace(path));
+                }
+                let entrypoint = path.join("SKILL.md");
+                if fs::symlink_metadata(&entrypoint).is_ok() {
+                    return Err(WorkspaceError::AlreadyExists(path));
+                }
+                if fs::read_dir(&path)?.next().is_some() {
+                    return Err(WorkspaceError::IncompleteWorkspace(path));
+                }
             }
-            if fs::read_dir(&path)?.next().is_some() {
-                return Err(WorkspaceError::IncompleteWorkspace(path));
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&path)?;
+                sync_directory(&self.root)?;
             }
-        } else {
-            fs::create_dir(&path)?;
-            sync_directory(&self.root)?;
+            Err(error) => return Err(WorkspaceError::Io(error)),
         }
 
         write_new_file_durable(&path.join("SKILL.md"), initial_skill_md.as_bytes())?;
         sync_directory(&path)?;
+        Ok(WorkspaceRef {
+            skill_id: skill_id.to_owned(),
+            path,
+        })
+    }
+
+    /// Materializes an already-validated immutable snapshot into a new managed
+    /// workspace. The caller owns source authorization/discovery; this method
+    /// only guarantees that the destination is inside SkillHive's workspace
+    /// root and is created atomically by snapshot materialization semantics.
+    pub fn import_snapshot(
+        &self,
+        blobs: &BlobStore,
+        skill_id: &str,
+        snapshot_hash: &str,
+    ) -> Result<WorkspaceRef, WorkspaceError> {
+        validate_skill_id(skill_id)?;
+        let path = self.path_for_skill(skill_id)?;
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(WorkspaceError::AlreadyExists(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+
+        materialize_snapshot(blobs, snapshot_hash, &path)?;
+        sync_directory(&self.root)?;
         Ok(WorkspaceRef {
             skill_id: skill_id.to_owned(),
             path,
@@ -119,7 +158,7 @@ impl WorkspaceStore {
 }
 
 fn validate_skill_id(skill_id: &str) -> Result<(), WorkspaceError> {
-    if skill_id.trim().is_empty() || skill_id.as_bytes().len() > 512 {
+    if skill_id.trim().is_empty() || skill_id.len() > 512 {
         return Err(WorkspaceError::InvalidSkillId);
     }
     Ok(())
@@ -143,14 +182,6 @@ fn ensure_directory(path: &Path) -> Result<(), WorkspaceError> {
             }
         }
         Err(error) => return Err(WorkspaceError::Io(error)),
-    }
-    Ok(())
-}
-
-fn validate_workspace_directory(path: &Path) -> Result<(), WorkspaceError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(WorkspaceError::InvalidWorkspace(path.to_path_buf()));
     }
     Ok(())
 }
@@ -211,6 +242,8 @@ fn sync_directory(_path: &Path) -> Result<(), WorkspaceError> {
 pub enum WorkspaceError {
     #[error("workspace filesystem error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("snapshot materialization error: {0}")]
+    Snapshot(#[from] SnapshotError),
     #[error("invalid skill id")]
     InvalidSkillId,
     #[error("invalid workspace root: {0:?}")]
@@ -228,6 +261,7 @@ pub enum WorkspaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill_snapshot::{capture_workspace, SnapshotPolicy};
 
     #[test]
     fn logical_ids_cannot_escape_workspace_root() {
@@ -245,5 +279,24 @@ mod tests {
         assert_eq!(fs::read(created.path.join("SKILL.md")).expect("read"), b"# Demo\n");
         assert!(workspaces.remove("skill-1").expect("remove"));
         assert!(workspaces.get("skill-1").expect("get").is_none());
+    }
+
+    #[test]
+    fn immutable_snapshot_can_be_imported_into_managed_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).expect("source");
+        fs::write(source.join("SKILL.md"), b"# Imported\n").expect("skill");
+        let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
+        let snapshot = capture_workspace(&blobs, &source, SnapshotPolicy::default()).expect("snapshot");
+        let workspaces = WorkspaceStore::open(temp.path().join("workspaces")).expect("store");
+
+        let imported = workspaces
+            .import_snapshot(&blobs, "skill-imported", &snapshot.manifest_hash)
+            .expect("import");
+        assert_eq!(
+            fs::read(imported.path.join("SKILL.md")).expect("read"),
+            b"# Imported\n"
+        );
     }
 }

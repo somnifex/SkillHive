@@ -95,12 +95,13 @@ impl LocalStore {
         .collect()
     }
 
-    /// Marks a synchronized, remote-backed skill as cloud-only after its local
-    /// immutable snapshot has been safely removed by CacheManager.
+    /// Atomically transitions one synchronized, remote-backed skill to
+    /// `remote_only` before CacheManager deletes any local immutable blobs.
     ///
-    /// The expected hash protects against racing a newer local version. The
-    /// transaction also rechecks pinning, sync state and deployment ownership.
-    pub fn mark_skill_remote_only_after_eviction(
+    /// This ordering intentionally prefers leaked cache bytes over an incorrect
+    /// "synced and local" database state after a process crash. The expected
+    /// hash prevents evicting a newer snapshot that raced the LRU decision.
+    pub fn claim_skill_for_eviction(
         &self,
         skill_id: &str,
         expected_snapshot_hash: &str,

@@ -95,8 +95,11 @@ class SkillVersionRead(ORMModel):
     id: str
     skill_id: str
     version: str
+    revision: int
     content: dict[str, Any]
     manifest: dict[str, Any]
+    package_manifest_hash: str | None
+    package_size_bytes: int | None
     dependency_config: dict[str, Any]
     change_log: str
     status: str
@@ -115,6 +118,8 @@ class SkillRead(ORMModel):
     tags: list[str]
     status: str
     current_version_id: str | None
+    sync_revision: int
+    current_package_hash: str | None
     created_by: str
     created_at: datetime
     updated_at: datetime

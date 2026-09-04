@@ -278,6 +278,72 @@ fn built_in_adapters() -> Vec<BuiltInAgentAdapter> {
     ]
 }
 
+/// Validates the identity/path shape of a profile before it is persisted.
+///
+/// Built-in profile identity and roots are derived exclusively from Rust
+/// adapters. A WebView caller can therefore not redirect a built-in descriptor
+/// to an arbitrary filesystem directory by forging `is_custom = false`.
+/// Custom profiles remain user-configurable, but must live in the reserved
+/// `custom:<id>` namespace so they cannot collide with built-in instances.
+pub fn validate_persisted_profile(
+    profile_id: &str,
+    descriptor_id: &str,
+    skill_root: &Path,
+    is_custom: bool,
+) -> Result<(), AgentAdapterError> {
+    validate_skill_root(skill_root)?;
+
+    if is_custom {
+        let custom_key = descriptor_id
+            .strip_prefix("custom:")
+            .filter(|value| valid_custom_key(value))
+            .ok_or_else(|| {
+                AgentAdapterError::InvalidProfileIdentity(
+                    "custom descriptor must be custom:<portable-id>".to_owned(),
+                )
+            })?;
+        let expected_id = format!("custom:{custom_key}:configured");
+        if profile_id != expected_id {
+            return Err(AgentAdapterError::InvalidProfileIdentity(format!(
+                "custom profile id must be {expected_id}"
+            )));
+        }
+        return Ok(());
+    }
+
+    let adapter = built_in_adapters()
+        .into_iter()
+        .find(|adapter| adapter.descriptor.id == descriptor_id)
+        .ok_or_else(|| {
+            AgentAdapterError::InvalidProfileIdentity(format!(
+                "unknown built-in descriptor: {descriptor_id}"
+            ))
+        })?;
+    let expected_id = format!("{}:default", adapter.descriptor.id);
+    if profile_id != expected_id {
+        return Err(AgentAdapterError::InvalidProfileIdentity(format!(
+            "built-in profile id must be {expected_id}"
+        )));
+    }
+
+    let expected_root = home_dir()?.join(adapter.relative_skill_root);
+    if skill_root != expected_root {
+        return Err(AgentAdapterError::InvalidProfileIdentity(format!(
+            "built-in profile {profile_id} must use {}",
+            expected_root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn valid_custom_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 pub fn validate_skill_root(path: &Path) -> Result<(), AgentAdapterError> {
     if path.as_os_str().is_empty() || !path.is_absolute() {
         return Err(AgentAdapterError::InvalidPath(
@@ -356,6 +422,8 @@ fn home_dir() -> Result<PathBuf, AgentAdapterError> {
 pub enum AgentAdapterError {
     #[error("agent skill path is invalid: {0}")]
     InvalidPath(String),
+    #[error("agent profile identity is invalid: {0}")]
+    InvalidProfileIdentity(String),
     #[error("agent discovery failed: {0}")]
     Discovery(String),
     #[error("home directory is unavailable")]
@@ -398,5 +466,39 @@ mod tests {
         assert!(descriptors.iter().any(|descriptor| {
             descriptor.id == "agent-skills" && descriptor.kind == AgentKind::UnifiedAgentSkills
         }));
+    }
+
+    #[test]
+    fn forged_builtin_root_is_rejected() {
+        let home = home_dir().expect("home");
+        let wrong = home.join("forged-skills");
+        assert!(matches!(
+            validate_persisted_profile(
+                "claude-code:default",
+                "claude-code",
+                &wrong,
+                false,
+            ),
+            Err(AgentAdapterError::InvalidProfileIdentity(_))
+        ));
+    }
+
+    #[test]
+    fn custom_profile_requires_reserved_identity_namespace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        assert!(validate_persisted_profile(
+            "custom:my-agent:configured",
+            "custom:my-agent",
+            &temp.path().join("skills"),
+            true,
+        )
+        .is_ok());
+        assert!(validate_persisted_profile(
+            "claude-code:default",
+            "claude-code",
+            &temp.path().join("skills"),
+            true,
+        )
+        .is_err());
     }
 }

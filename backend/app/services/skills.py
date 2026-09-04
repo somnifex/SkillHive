@@ -1,10 +1,9 @@
 from math import ceil
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
-from app.models import Skill, SkillVersion, User
+from app.models import Skill, User
 from app.repositories.skills import SkillRepository
 from app.schemas.common import Page
 from app.schemas.skill import (
@@ -14,14 +13,22 @@ from app.schemas.skill import (
     SkillVersionCreate,
     SkillVersionRead,
 )
-from app.services.audit import write_audit
+from app.services.skill_mutations import SkillMutationService
 
 
 class PrivateSkillService:
+    """Authorization/read facade for private Skills.
+
+    REST transaction ownership remains here for backward-compatible behavior.
+    The actual Skill mutations are delegated to SkillMutationService, which does
+    not commit and can therefore be reused by the M2 sync transaction boundary.
+    """
+
     def __init__(self, session: Session, user: User) -> None:
         self.session = session
         self.user = user
         self.repository = SkillRepository(session)
+        self.mutations = SkillMutationService(session, user.id)
 
     def list_page(
         self,
@@ -57,39 +64,23 @@ class PrivateSkillService:
     def create(self, data: SkillCreate) -> SkillRead:
         if self.repository.slug_exists(self.user.id, data.slug):
             raise AppError("SKILL_SLUG_TAKEN", "A skill with this slug already exists.", 409)
-        skill = Skill(
-            name=data.name.strip(),
+
+        skill, _ = self.mutations.create_skill(
+            name=data.name,
             slug=data.slug,
             description=data.description,
             skill_type="private",
             owner_user_id=self.user.id,
             category=data.category,
             tags=data.tags,
-            status="draft",
-            created_by=self.user.id,
-        )
-        self.session.add(skill)
-        self.session.flush()
-        version = SkillVersion(
-            skill_id=skill.id,
+            skill_status="draft",
             version=data.version,
             content=data.content.model_dump(mode="json"),
-            manifest={"name": skill.slug, "schema_version": 1},
+            manifest={"name": data.slug, "schema_version": 1},
             dependency_config={},
             change_log=data.change_log,
-            status="draft",
-            created_by=self.user.id,
-        )
-        self.session.add(version)
-        self.session.flush()
-        skill.current_version_id = version.id
-        write_audit(
-            self.session,
-            actor_user_id=self.user.id,
-            action="private_skill.created",
-            resource_type="skill",
-            resource_id=skill.id,
-            after_data={"name": skill.name, "version": version.version},
+            version_status="draft",
+            audit_action="private_skill.created",
         )
         self.session.commit()
         return self._read(skill)
@@ -99,64 +90,32 @@ class PrivateSkillService:
 
     def update(self, skill_id: str, data: SkillUpdate) -> SkillRead:
         skill = self._owned(skill_id)
-        before = {"name": skill.name, "status": skill.status, "version": skill.current_version_id}
         updates = data.model_dump(exclude_unset=True, exclude={"content", "version", "change_log"})
-        for key, value in updates.items():
-            if value is not None:
-                setattr(skill, key, value)
-        if data.content is not None:
-            version_name = data.version or self._next_version(skill)
-            self._ensure_version_available(skill.id, version_name)
-            version = SkillVersion(
-                skill_id=skill.id,
-                version=version_name,
-                content=data.content.model_dump(mode="json"),
-                manifest={"name": skill.slug, "schema_version": 1},
-                dependency_config={},
-                change_log=data.change_log,
-                status="draft",
-                created_by=self.user.id,
-            )
-            self.session.add(version)
-            self.session.flush()
-            skill.current_version_id = version.id
-        write_audit(
-            self.session,
-            actor_user_id=self.user.id,
-            action="private_skill.updated",
-            resource_type="skill",
-            resource_id=skill.id,
-            before_data=before,
-            after_data={"name": skill.name, "status": skill.status},
+        content = data.content.model_dump(mode="json") if data.content is not None else None
+        self.mutations.update_skill(
+            skill,
+            updates=updates,
+            audit_action="private_skill.updated",
+            content=content,
+            version=data.version,
+            change_log=data.change_log,
+            version_status="draft",
         )
         self.session.commit()
         return self._read(skill)
 
     def create_version(self, skill_id: str, data: SkillVersionCreate) -> SkillVersionRead:
         skill = self._owned(skill_id)
-        self._ensure_version_available(skill.id, data.version)
-        version = SkillVersion(
-            skill_id=skill.id,
+        version = self.mutations.create_version(
+            skill,
             version=data.version,
             content=data.content.model_dump(mode="json"),
             manifest=data.manifest,
             dependency_config=data.dependency_config,
             change_log=data.change_log,
-            status=data.status,
-            created_by=self.user.id,
-        )
-        self.session.add(version)
-        self.session.flush()
-        skill.current_version_id = version.id
-        if data.status == "published":
-            skill.status = "published"
-        write_audit(
-            self.session,
-            actor_user_id=self.user.id,
-            action="private_skill.version_created",
-            resource_type="skill",
-            resource_id=skill.id,
-            after_data={"version": version.version, "status": version.status},
+            version_status=data.status,
+            audit_action="private_skill.version_created",
+            publish_skill=data.status == "published",
         )
         self.session.commit()
         return SkillVersionRead.model_validate(version)
@@ -193,18 +152,7 @@ class PrivateSkillService:
 
     def delete(self, skill_id: str) -> None:
         skill = self._owned(skill_id)
-        skill.status = "deleted"
-        from app.db.base import utc_now
-
-        skill.deleted_at = utc_now()
-        write_audit(
-            self.session,
-            actor_user_id=self.user.id,
-            action="private_skill.deleted",
-            resource_type="skill",
-            resource_id=skill.id,
-            before_data={"name": skill.name},
-        )
+        self.mutations.soft_delete(skill, audit_action="private_skill.deleted")
         self.session.commit()
 
     def _owned(self, skill_id: str) -> Skill:
@@ -218,24 +166,3 @@ class PrivateSkillService:
         result = SkillRead.model_validate(skill)
         result.current_version = SkillVersionRead.model_validate(current) if current else None
         return result
-
-    def _ensure_version_available(self, skill_id: str, version: str) -> None:
-        exists = self.session.scalar(
-            select(SkillVersion.id).where(
-                SkillVersion.skill_id == skill_id,
-                SkillVersion.version == version,
-            )
-        )
-        if exists is not None:
-            raise AppError("VERSION_EXISTS", "This version already exists.", 409)
-
-    def _next_version(self, skill: Skill) -> str:
-        current = self.repository.version(skill.current_version_id)
-        if current is None:
-            return "0.1.0"
-        base = current.version.split("-", 1)[0]
-        try:
-            major, minor, patch = (int(part) for part in base.split("."))
-        except ValueError:
-            return "0.1.0"
-        return f"{major}.{minor}.{patch + 1}"

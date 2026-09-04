@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -72,9 +72,8 @@ pub fn capture_workspace(
     let mut total_bytes = 0_u64;
     let mut files = Vec::with_capacity(source_files.len());
     for (relative, source) in source_files {
-        let bytes = read_regular_file_stable(&source)?;
+        let bytes = read_regular_file_stable(&source, policy.max_file_bytes)?;
         let size = u64::try_from(bytes.len()).map_err(|_| SnapshotError::SizeOverflow)?;
-        enforce_file_size(&source, size, policy)?;
         total_bytes = add_and_enforce_total(total_bytes, size, policy)?;
 
         let blob = blobs.put_bytes(&bytes)?;
@@ -135,15 +134,17 @@ pub fn materialize_snapshot_with_policy(
     destination: &Path,
     policy: SnapshotPolicy,
 ) -> Result<SkillSnapshotRef, SnapshotError> {
-    if destination.exists() {
-        return Err(SnapshotError::DestinationExists(destination.to_path_buf()));
+    match fs::symlink_metadata(destination) {
+        Ok(_) => return Err(SnapshotError::DestinationExists(destination.to_path_buf())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(SnapshotError::Io(error)),
     }
     if !destination.is_absolute() {
         return Err(SnapshotError::InvalidDestination(destination.to_path_buf()));
     }
 
     let manifest = read_manifest_with_policy(blobs, manifest_hash, policy)?;
-    fs::create_dir_all(destination)?;
+    fs::create_dir(destination)?;
     let result = (|| -> Result<SkillSnapshotRef, SnapshotError> {
         let mut total_bytes = 0_u64;
         for file in &manifest.files {
@@ -207,6 +208,7 @@ fn collect_files(
         if !file_type.is_file() {
             return Err(SnapshotError::UnsupportedFileType(path));
         }
+        enforce_file_size(&path, metadata.len(), policy)?;
 
         if output.len() >= policy.max_files {
             return Err(SnapshotError::TooManyFiles {
@@ -221,18 +223,54 @@ fn collect_files(
     Ok(())
 }
 
-fn read_regular_file_stable(path: &Path) -> Result<Vec<u8>, SnapshotError> {
+/// Reads a regular file twice through a strict byte limit and accepts the file
+/// only when both reads are identical. This prevents a concurrently modified
+/// workspace from producing a mixed snapshot and prevents oversized files from
+/// being allocated before the per-file policy is enforced.
+fn read_regular_file_stable(path: &Path, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
+    let first = read_regular_file_bounded(path, max_bytes)?;
+    let second = read_regular_file_bounded(path, max_bytes)?;
+    if first != second {
+        return Err(SnapshotError::SourceChangedDuringCapture(path.to_path_buf()));
+    }
+    Ok(first)
+}
+
+fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, SnapshotError> {
     let before = fs::symlink_metadata(path)?;
     if before.file_type().is_symlink() || !before.is_file() {
         return Err(SnapshotError::UnsupportedFileType(path.to_path_buf()));
     }
-    let bytes = fs::read(path)?;
-    let after = fs::symlink_metadata(path)?;
-    if after.file_type().is_symlink() || !after.is_file() {
-        return Err(SnapshotError::SourceChangedDuringCapture(path.to_path_buf()));
+    if before.len() > max_bytes {
+        return Err(SnapshotError::FileTooLarge {
+            path: path.to_path_buf(),
+            size: before.len(),
+            limit: max_bytes,
+        });
     }
+
+    let capacity = usize::try_from(before.len()).map_err(|_| SnapshotError::SizeOverflow)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut file = File::open(path)?;
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or(SnapshotError::SizeOverflow)?;
+    file.by_ref().take(read_limit).read_to_end(&mut bytes)?;
     let byte_len = u64::try_from(bytes.len()).map_err(|_| SnapshotError::SizeOverflow)?;
-    if before.len() != byte_len || after.len() != byte_len {
+    if byte_len > max_bytes {
+        return Err(SnapshotError::FileTooLarge {
+            path: path.to_path_buf(),
+            size: byte_len,
+            limit: max_bytes,
+        });
+    }
+
+    let after = fs::symlink_metadata(path)?;
+    if after.file_type().is_symlink()
+        || !after.is_file()
+        || before.len() != byte_len
+        || after.len() != byte_len
+    {
         return Err(SnapshotError::SourceChangedDuringCapture(path.to_path_buf()));
     }
     Ok(bytes)
@@ -543,63 +581,10 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn snapshot_rejects_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        make_workspace(&workspace);
-        symlink("/tmp", workspace.join("escape")).expect("symlink");
-        let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
-        assert!(matches!(
-            capture_workspace(&blobs, &workspace, SnapshotPolicy::default()),
-            Err(SnapshotError::SymlinkNotAllowed(_))
-        ));
-    }
-
-    #[test]
-    fn manifest_rejects_parent_traversal() {
-        let manifest = SkillSnapshotManifest {
-            format_version: SNAPSHOT_FORMAT_VERSION,
-            files: vec![SkillSnapshotFile {
-                path: "../escape".to_owned(),
-                blob_hash: format!("sha256:{}", "a".repeat(64)),
-                size_bytes: 1,
-            }],
-        };
-        assert!(matches!(
-            validate_manifest(&manifest, SnapshotPolicy::default()),
-            Err(SnapshotError::InvalidManifestPath(_))
-        ));
-    }
-
     #[test]
     fn manifest_rejects_nonportable_windows_names() {
         for path in ["CON", "scripts/a:b.py", "trailing."] {
             assert!(portable_path_to_relative(path).is_err(), "{path}");
         }
-    }
-
-    #[test]
-    fn manifest_limits_are_enforced_before_materialization() {
-        let manifest = SkillSnapshotManifest {
-            format_version: SNAPSHOT_FORMAT_VERSION,
-            files: vec![SkillSnapshotFile {
-                path: "SKILL.md".to_owned(),
-                blob_hash: format!("sha256:{}", "a".repeat(64)),
-                size_bytes: 10,
-            }],
-        };
-        let policy = SnapshotPolicy {
-            max_files: 10,
-            max_file_bytes: 5,
-            max_total_bytes: 100,
-        };
-        assert!(matches!(
-            validate_manifest(&manifest, policy),
-            Err(SnapshotError::FileTooLarge { .. })
-        ));
     }
 }

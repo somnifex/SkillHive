@@ -1,21 +1,27 @@
 pub mod agent;
 pub mod blob_store;
+pub mod cache_manager;
 pub mod credentials;
 pub mod deployment;
 pub mod local_store;
 pub mod skill_snapshot;
+pub mod snapshot_verifier;
 pub mod sync;
 
 use std::{path::PathBuf, sync::Mutex};
 
-use agent::{AgentDiscoveryResult, AgentRegistry};
+use agent::{AgentDescriptor, AgentDiscoveryResult, AgentInstance, AgentKind, AgentRegistry};
 use blob_store::BlobStore;
+use cache_manager::{enforce_cache_budget, CacheEnforcementReport};
 use deployment::{DeploymentEngine, DeploymentRequest, RecoveryReport};
 use local_store::{
-    AgentProfileRecord, DeploymentState, LocalStore, LocalStoreHealth, RecordDeployment,
+    AgentProfileRecord, CommitSkillEdit, DeploymentState, LocalCachePolicy, LocalMutation,
+    LocalSkill, LocalStore, LocalStoreHealth, MutationOperation, RecordDeployment,
     SkillDeploymentRecord, SkillSyncState, UpsertAgentProfile,
 };
 use serde::{Deserialize, Serialize};
+use skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotPolicy};
+use snapshot_verifier::verify_materialized_snapshot;
 use tauri::Manager;
 
 #[derive(Debug, Default)]
@@ -28,6 +34,9 @@ pub struct DesktopStartupStatus {
     pub local_store: LocalStoreHealth,
     pub recovered_in_flight_mutations: u64,
     pub deployment_recovery: RecoveryReport,
+    pub agent_reconciliation_errors: Vec<String>,
+    pub cache_enforcement: Option<CacheEnforcementReport>,
+    pub cache_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +52,28 @@ pub struct SaveAgentProfileRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CommitLocalSkillWorkspaceRequest {
+    pub skill_id: String,
+    pub remote_id: Option<String>,
+    pub name: String,
+    pub slug: String,
+    pub workspace_path: PathBuf,
+    pub base_revision: Option<i64>,
+    pub operation: MutationOperation,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitLocalSkillWorkspaceResult {
+    pub skill: LocalSkill,
+    pub snapshot: SkillSnapshotRef,
+    pub mutation: LocalMutation,
+    pub cache_enforcement: Option<CacheEnforcementReport>,
+    pub cache_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeploySkillToAgentRequest {
     pub skill_id: String,
     pub agent_profile_id: String,
@@ -53,7 +84,7 @@ pub struct DeploySkillToAgentRequest {
 pub struct DeploySkillToAgentResult {
     pub deployment: SkillDeploymentRecord,
     /// True only when filesystem + SQLite are correct but journal cleanup failed.
-    /// Startup recovery will retry the cleanup without repeating deployment.
+    /// Startup recovery will retry cleanup without repeating deployment.
     pub recovery_pending: bool,
 }
 
@@ -63,8 +94,16 @@ fn local_store_health(store: tauri::State<'_, LocalStore>) -> Result<LocalStoreH
 }
 
 #[tauri::command]
-fn discover_agents(registry: tauri::State<'_, AgentRegistry>) -> Vec<AgentDiscoveryResult> {
-    registry.discover_all()
+fn discover_agents(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    registry: tauri::State<'_, AgentRegistry>,
+) -> Result<Vec<AgentDiscoveryResult>, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    discover_and_reconcile_agents(&store, &registry).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -96,6 +135,61 @@ fn save_agent_profile(
         .map_err(|error| error.to_string())
 }
 
+/// The only WebView-facing path for committing a mutable workspace.
+///
+/// The WebView never supplies `blob_hash`. The privileged core captures an
+/// immutable snapshot first, then commits the local skill row and durable outbox
+/// mutation in one SQLite transaction. Orphan blobs after a DB failure are safe
+/// and later reclaimable by CacheManager.
+#[tauri::command]
+fn commit_local_skill_workspace(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+    request: CommitLocalSkillWorkspaceRequest,
+) -> Result<CommitLocalSkillWorkspaceResult, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+
+    if request.operation == MutationOperation::Delete {
+        return Err("workspace commit does not accept delete; deletion uses the tombstone path".to_owned());
+    }
+
+    let snapshot = capture_workspace(&blobs, &request.workspace_path, SnapshotPolicy::default())
+        .map_err(|error| error.to_string())?;
+    let mutation = store
+        .commit_skill_edit(CommitSkillEdit {
+            skill_id: request.skill_id.clone(),
+            remote_id: request.remote_id,
+            name: request.name,
+            slug: request.slug,
+            workspace_path: request.workspace_path,
+            blob_hash: snapshot.manifest_hash.clone(),
+            base_revision: request.base_revision,
+            operation: request.operation,
+        })
+        .map_err(|error| error.to_string())?;
+    let skill = store
+        .get_skill(&request.skill_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("skill disappeared after local commit: {}", request.skill_id))?;
+
+    let (cache_enforcement, cache_error) = match enforce_cache_budget(&store, &blobs) {
+        Ok(report) => (Some(report), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+
+    Ok(CommitLocalSkillWorkspaceResult {
+        skill,
+        snapshot,
+        mutation,
+        cache_enforcement,
+        cache_error,
+    })
+}
+
 #[tauri::command]
 fn deploy_skill_to_agent(
     coordinator: tauri::State<'_, DesktopMutationCoordinator>,
@@ -124,10 +218,8 @@ fn deploy_skill_to_agent(
     }
 
     let profile = store
-        .list_agent_profiles()
+        .get_agent_profile(&request.agent_profile_id)
         .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|profile| profile.id == request.agent_profile_id)
         .ok_or_else(|| format!("agent profile not found: {}", request.agent_profile_id))?;
     if !profile.enabled {
         return Err(format!("agent profile is disabled: {}", profile.id));
@@ -146,8 +238,16 @@ fn deploy_skill_to_agent(
         )
         .map_err(|error| error.to_string())?;
 
-    // Do not ACK the filesystem journal until this SQLite write succeeds. If the
-    // process dies here, startup recovery replays this idempotent catalog write.
+    // A directory existing at the target path is not sufficient evidence of a
+    // successful deployment. Verify every path, size and content hash before the
+    // durable catalog is allowed to claim the deployment is installed.
+    verify_materialized_snapshot(
+        &blobs,
+        &filesystem_result.snapshot_hash,
+        &filesystem_result.target_path,
+    )
+    .map_err(|error| error.to_string())?;
+
     let catalog = store
         .record_deployment(RecordDeployment {
             skill_id: filesystem_result.skill_id.clone(),
@@ -170,10 +270,129 @@ fn deploy_skill_to_agent(
 }
 
 #[tauri::command]
+fn enforce_local_cache(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+) -> Result<CacheEnforcementReport, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    enforce_cache_budget(&store, &blobs).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_local_cache_policy(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+    policy: LocalCachePolicy,
+) -> Result<CacheEnforcementReport, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    store
+        .set_cache_policy(policy)
+        .map_err(|error| error.to_string())?;
+    enforce_cache_budget(&store, &blobs).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn desktop_startup_status(
     status: tauri::State<'_, DesktopStartupStatus>,
 ) -> DesktopStartupStatus {
     status.inner().clone()
+}
+
+fn discover_and_reconcile_agents(
+    store: &LocalStore,
+    registry: &AgentRegistry,
+) -> Result<Vec<AgentDiscoveryResult>, local_store::LocalStoreError> {
+    let mut results = registry.discover_all();
+
+    for result in &mut results {
+        for instance in result.instances.clone() {
+            let existing = store.get_agent_profile(&instance.id)?;
+            if existing.as_ref().is_some_and(|profile| profile.is_custom) {
+                append_discovery_error(
+                    result,
+                    format!(
+                        "detected built-in profile {} collides with a persisted custom profile",
+                        instance.id
+                    ),
+                );
+                continue;
+            }
+
+            let enabled = existing.map(|profile| profile.enabled).unwrap_or(true);
+            if let Err(error) = store.upsert_agent_profile(UpsertAgentProfile {
+                id: instance.id.clone(),
+                descriptor_id: instance.descriptor_id.clone(),
+                display_name: instance.display_name.clone(),
+                skill_root: instance.skill_root.clone(),
+                enabled,
+                is_custom: false,
+            }) {
+                append_discovery_error(
+                    result,
+                    format!("failed to reconcile profile {}: {error}", instance.id),
+                );
+            }
+        }
+    }
+
+    // Persisted custom profiles are configuration, not heuristic discovery. They
+    // remain visible even when the directory does not exist yet so the user can
+    // create/repair the target without source-code changes.
+    for profile in store
+        .list_agent_profiles()?
+        .into_iter()
+        .filter(|profile| profile.is_custom)
+    {
+        let validation_error = if profile.skill_root.exists() && !profile.skill_root.is_dir() {
+            Some(format!(
+                "{} exists but is not a directory",
+                profile.skill_root.display()
+            ))
+        } else {
+            None
+        };
+        results.push(AgentDiscoveryResult {
+            descriptor: AgentDescriptor {
+                id: profile.descriptor_id.clone(),
+                display_name: profile.display_name.clone(),
+                kind: AgentKind::Custom,
+            },
+            instances: if validation_error.is_none() {
+                vec![AgentInstance {
+                    id: profile.id,
+                    descriptor_id: profile.descriptor_id,
+                    display_name: profile.display_name,
+                    skill_root_exists: profile.skill_root.exists(),
+                    skill_root: profile.skill_root,
+                    enabled: profile.enabled,
+                    detected: true,
+                }]
+            } else {
+                Vec::new()
+            },
+            error: validation_error,
+        });
+    }
+
+    Ok(results)
+}
+
+fn append_discovery_error(result: &mut AgentDiscoveryResult, error: String) {
+    match &mut result.error {
+        Some(existing) => {
+            existing.push_str("; ");
+            existing.push_str(&error);
+        }
+        None => result.error = Some(error),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -188,9 +407,20 @@ pub fn run() {
             let mut deployment_recovery = deployment.recover_incomplete()?;
 
             // Filesystem recovery may complete activation before SQLite knew the
-            // final state. Replay the catalog write, then ACK the journal. Any
-            // failure is diagnostic and leaves the journal intact for retry.
+            // final state. Verify recovered content before replaying the catalog.
             for recovered in deployment_recovery.catalog_commits.clone() {
+                if let Err(error) = verify_materialized_snapshot(
+                    &blobs,
+                    &recovered.snapshot_hash,
+                    &recovered.target_path,
+                ) {
+                    deployment_recovery.failed.push(format!(
+                        "deployment {} recovered a target that does not match snapshot {}: {error}",
+                        recovered.transaction_id, recovered.snapshot_hash
+                    ));
+                    continue;
+                }
+
                 let catalog_result = store.record_deployment(RecordDeployment {
                     skill_id: recovered.skill_id.clone(),
                     agent_profile_id: recovered.agent_profile_id.clone(),
@@ -217,8 +447,22 @@ pub fn run() {
                 }
             }
 
-            let local_store = store.health()?;
             let registry = AgentRegistry::builtin();
+            let agent_results = discover_and_reconcile_agents(&store, &registry)?;
+            let agent_reconciliation_errors = agent_results
+                .into_iter()
+                .filter_map(|result| {
+                    result
+                        .error
+                        .map(|error| format!("{}: {error}", result.descriptor.id))
+                })
+                .collect();
+
+            let (cache_enforcement, cache_error) = match enforce_cache_budget(&store, &blobs) {
+                Ok(report) => (Some(report), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let local_store = store.health()?;
 
             app.manage(store);
             app.manage(blobs);
@@ -229,6 +473,9 @@ pub fn run() {
                 local_store,
                 recovered_in_flight_mutations,
                 deployment_recovery,
+                agent_reconciliation_errors,
+                cache_enforcement,
+                cache_error,
             });
             Ok(())
         })
@@ -237,7 +484,10 @@ pub fn run() {
             discover_agents,
             list_agent_profiles,
             save_agent_profile,
+            commit_local_skill_workspace,
             deploy_skill_to_agent,
+            enforce_local_cache,
+            set_local_cache_policy,
             desktop_startup_status
         ])
         .run(tauri::generate_context!())

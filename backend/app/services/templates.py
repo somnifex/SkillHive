@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
 from app.db.base import utc_now
-from app.models import Group, GroupMember, Skill, SkillTemplate, SkillVersion, User
+from app.models import Group, GroupMember, SkillTemplate, User
 from app.repositories.groups import GroupRepository
 from app.repositories.skills import SkillRepository
 from app.schemas.common import Page
@@ -18,6 +18,7 @@ from app.schemas.template import (
     TemplateUpdate,
 )
 from app.services.audit import write_audit
+from app.services.skill_mutations import SkillMutationService
 
 DEFAULT_TEMPLATE_SLUG = "openai-recommended-skill"
 DEFAULT_TEMPLATE_INSTRUCTIONS = """# 工作流
@@ -92,6 +93,7 @@ class TemplateService:
         self.user = user
         self.groups = GroupRepository(session)
         self.skills = SkillRepository(session)
+        self.skill_mutations = SkillMutationService(session, user.id)
 
     def list_page(
         self,
@@ -235,6 +237,7 @@ class TemplateService:
             raise AppError("TEMPLATE_UNAVAILABLE", "This template is not published.", 409)
         if self.skills.slug_exists(self.user.id, data.slug):
             raise AppError("SKILL_SLUG_TAKEN", "A skill with this slug already exists.", 409)
+
         description = data.description if data.description is not None else template.description
         category = data.category if data.category is not None else template.category
         tags = data.tags if data.tags is not None else list(template.tags)
@@ -255,49 +258,36 @@ class TemplateService:
                 "Workflow instructions are required.",
                 422,
             )
+
         content = dict(template.content)
         content["instructions"] = instructions
         content["skill_markdown"] = self._skill_markdown(data.slug, description, instructions)
-        skill = Skill(
-            name=data.name.strip(),
+        manifest = {
+            **template.manifest,
+            "name": data.slug,
+            "description": description,
+            "source_template_id": template.id,
+        }
+        skill, version = self.skill_mutations.create_skill(
+            name=data.name,
             slug=data.slug,
             description=description,
             skill_type="private",
             owner_user_id=self.user.id,
             category=category,
             tags=tags,
-            status="draft",
-            created_by=self.user.id,
-        )
-        self.session.add(skill)
-        self.session.flush()
-        version = SkillVersion(
-            skill_id=skill.id,
+            skill_status="draft",
             version=data.version,
             content=content,
-            manifest={
-                **template.manifest,
-                "name": data.slug,
-                "description": description,
-                "source_template_id": template.id,
-            },
+            manifest=manifest,
             dependency_config={},
             change_log=f"Created from template: {template.name}",
-            status="draft",
-            created_by=self.user.id,
-        )
-        self.session.add(version)
-        self.session.flush()
-        skill.current_version_id = version.id
-        write_audit(
-            self.session,
-            actor_user_id=self.user.id,
-            action="skill_template.instantiated",
-            resource_type="skill",
-            resource_id=skill.id,
-            after_data={"template_id": template.id, "name": skill.name},
+            version_status="draft",
+            audit_action="skill_template.instantiated",
+            audit_after_data={"template_id": template.id},
         )
         self.session.commit()
+
         result = SkillRead.model_validate(skill)
         result.current_version = SkillVersionRead.model_validate(version)
         return result

@@ -17,13 +17,17 @@ from app.schemas.skill import (
     SkillVersionRead,
 )
 from app.services.audit import write_audit
+from app.services.skill_mutations import SkillMutationService
 
 
 class GlobalSkillService:
+    """Global-skill authorization/read facade with shared domain mutations."""
+
     def __init__(self, session: Session, admin: User) -> None:
         self.session = session
         self.admin = admin
         self.repository = SkillRepository(session)
+        self.mutations = SkillMutationService(session, admin.id)
 
     def list_page(
         self,
@@ -65,39 +69,23 @@ class GlobalSkillService:
         )
         if duplicate:
             raise AppError("SKILL_SLUG_TAKEN", "A global skill with this slug exists.", 409)
-        skill = Skill(
-            name=data.name.strip(),
+
+        skill, _ = self.mutations.create_skill(
+            name=data.name,
             slug=data.slug,
             description=data.description,
             skill_type="global",
             owner_user_id=None,
             category=data.category,
             tags=data.tags,
-            status="draft",
-            created_by=self.admin.id,
-        )
-        self.session.add(skill)
-        self.session.flush()
-        version = SkillVersion(
-            skill_id=skill.id,
+            skill_status="draft",
             version=data.version,
             content=data.content.model_dump(mode="json"),
-            manifest={"name": skill.slug, "schema_version": 1},
+            manifest={"name": data.slug, "schema_version": 1},
             dependency_config={},
             change_log=data.change_log,
-            status="draft",
-            created_by=self.admin.id,
-        )
-        self.session.add(version)
-        self.session.flush()
-        skill.current_version_id = version.id
-        write_audit(
-            self.session,
-            actor_user_id=self.admin.id,
-            action="global_skill.created",
-            resource_type="skill",
-            resource_id=skill.id,
-            after_data={"name": skill.name, "version": version.version},
+            version_status="draft",
+            audit_action="global_skill.created",
         )
         self.session.commit()
         return self._read(skill)
@@ -108,56 +96,33 @@ class GlobalSkillService:
     def update(self, skill_id: str, data: GlobalSkillUpdate) -> SkillRead:
         skill = self._global(skill_id)
         updates = data.model_dump(exclude_unset=True, exclude={"content", "version", "change_log"})
-        for key, value in updates.items():
-            if value is not None:
-                setattr(skill, key, value)
-        if data.content is not None:
-            version_name = data.version or self._next_version(skill)
-            self._ensure_version_available(skill.id, version_name)
-            version = SkillVersion(
-                skill_id=skill.id,
-                version=version_name,
-                content=data.content.model_dump(mode="json"),
-                manifest={"name": skill.slug, "schema_version": 1},
-                dependency_config={},
-                change_log=data.change_log,
-                status="draft",
-                created_by=self.admin.id,
-            )
-            self.session.add(version)
-            self.session.flush()
-            skill.current_version_id = version.id
-            if skill.status == "published":
-                skill.status = "draft"
-        write_audit(
-            self.session,
-            actor_user_id=self.admin.id,
-            action="global_skill.updated",
-            resource_type="skill",
-            resource_id=skill.id,
-            after_data={"name": skill.name, "status": skill.status},
+        content = data.content.model_dump(mode="json") if data.content is not None else None
+        self.mutations.update_skill(
+            skill,
+            updates=updates,
+            audit_action="global_skill.updated",
+            content=content,
+            version=data.version,
+            change_log=data.change_log,
+            version_status="draft",
+            demote_published_on_new_version=True,
         )
         self.session.commit()
         return self._read(skill)
 
     def create_version(self, skill_id: str, data: SkillVersionCreate) -> SkillVersionRead:
         skill = self._global(skill_id)
-        self._ensure_version_available(skill.id, data.version)
-        version = SkillVersion(
-            skill_id=skill.id,
+        version = self.mutations.create_version(
+            skill,
             version=data.version,
             content=data.content.model_dump(mode="json"),
             manifest=data.manifest,
             dependency_config=data.dependency_config,
             change_log=data.change_log,
-            status="draft",
-            created_by=self.admin.id,
+            version_status="draft",
+            audit_action="global_skill.version_created",
+            demote_published_skill=True,
         )
-        self.session.add(version)
-        self.session.flush()
-        skill.current_version_id = version.id
-        if skill.status == "published":
-            skill.status = "draft"
         self.session.commit()
         return SkillVersionRead.model_validate(version)
 
@@ -172,32 +137,20 @@ class GlobalSkillService:
         )
         if version is None:
             raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
-        version.status = "published"
-        skill.current_version_id = version.id
-        skill.status = "published"
-        write_audit(
-            self.session,
-            actor_user_id=self.admin.id,
-            action="global_skill.published",
-            resource_type="skill",
-            resource_id=skill.id,
-            after_data={"version": version.version},
+        self.mutations.publish_version(
+            skill,
+            version,
+            audit_action="global_skill.published",
         )
         self.session.commit()
         return self._read(skill)
 
     def set_status(self, skill_id: str, status: str) -> SkillRead:
         skill = self._global(skill_id)
-        before = skill.status
-        skill.status = status
-        write_audit(
-            self.session,
-            actor_user_id=self.admin.id,
-            action=f"global_skill.{status}",
-            resource_type="skill",
-            resource_id=skill.id,
-            before_data={"status": before},
-            after_data={"status": status},
+        self.mutations.set_status(
+            skill,
+            status,
+            audit_action=f"global_skill.{status}",
         )
         self.session.commit()
         return self._read(skill)
@@ -267,19 +220,3 @@ class GlobalSkillService:
         version = self.repository.version(version_id)
         result.effective_version = SkillVersionRead.model_validate(version) if version else None
         return result
-
-    def _ensure_version_available(self, skill_id: str, version: str) -> None:
-        if self.session.scalar(
-            select(SkillVersion.id).where(
-                SkillVersion.skill_id == skill_id,
-                SkillVersion.version == version,
-            )
-        ):
-            raise AppError("VERSION_EXISTS", "This version already exists.", 409)
-
-    def _next_version(self, skill: Skill) -> str:
-        current = self.repository.version(skill.current_version_id)
-        if current is None:
-            return "0.1.0"
-        major, minor, patch = (int(part) for part in current.version.split("-", 1)[0].split("."))
-        return f"{major}.{minor}.{patch + 1}"

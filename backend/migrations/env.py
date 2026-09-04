@@ -7,14 +7,18 @@ from app.core.config import settings
 from app.db.base import Base
 from app.models import (  # noqa: F401
     AuditLog,
+    Device,
     Group,
     GroupInvitation,
     GroupJoinRequest,
     GroupMember,
     GroupSkillGrant,
     Skill,
+    SkillBlobObject,
     SkillTemplate,
     SkillVersion,
+    SyncChangeLog,
+    SyncMutationReceipt,
     TokenSession,
     User,
 )

@@ -3,7 +3,9 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -124,7 +126,10 @@ class GroupJoinRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class Skill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "skills"
-    __table_args__ = (UniqueConstraint("owner_user_id", "slug", name="uq_owner_skill_slug"),)
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "slug", name="uq_owner_skill_slug"),
+        CheckConstraint("sync_revision >= 1", name="ck_skill_sync_revision_positive"),
+    )
 
     name: Mapped[str] = mapped_column(String(120), index=True)
     slug: Mapped[str] = mapped_column(String(140), index=True)
@@ -135,6 +140,8 @@ class Skill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     current_version_id: Mapped[str | None] = mapped_column(String(36))
+    sync_revision: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    current_package_hash: Mapped[str | None] = mapped_column(String(71))
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -147,15 +154,26 @@ class Skill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class SkillVersion(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "skill_versions"
-    __table_args__ = (UniqueConstraint("skill_id", "version", name="uq_skill_version"),)
+    __table_args__ = (
+        UniqueConstraint("skill_id", "version", name="uq_skill_version"),
+        UniqueConstraint("skill_id", "revision", name="uq_skill_version_revision"),
+        CheckConstraint("revision >= 1", name="ck_skill_version_revision_positive"),
+        CheckConstraint(
+            "package_size_bytes IS NULL OR package_size_bytes >= 0",
+            name="ck_skill_version_package_size_nonnegative",
+        ),
+    )
 
     skill_id: Mapped[str] = mapped_column(
         ForeignKey("skills.id", ondelete="CASCADE"),
         index=True,
     )
     version: Mapped[str] = mapped_column(String(40))
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[dict[str, Any]] = mapped_column(JSON)
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    package_manifest_hash: Mapped[str | None] = mapped_column(String(71))
+    package_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     dependency_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     change_log: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)

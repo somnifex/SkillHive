@@ -11,17 +11,22 @@ from app.models.domain import (
     TokenSession,
     User,
 )
+from app.models.sync import Device, SkillBlobObject, SyncChangeLog, SyncMutationReceipt
 
 __all__ = [
     "AuditLog",
+    "Device",
     "Group",
     "GroupInvitation",
     "GroupJoinRequest",
     "GroupMember",
     "GroupSkillGrant",
     "Skill",
+    "SkillBlobObject",
     "SkillTemplate",
     "SkillVersion",
+    "SyncChangeLog",
+    "SyncMutationReceipt",
     "TokenSession",
     "User",
 ]

@@ -18,8 +18,6 @@ pub struct CacheSkillRecord {
     pub snapshot_hash: String,
     pub sync_state: SkillSyncState,
     pub pinned: bool,
-    /// SQLite UTC timestamp used for LRU ordering. It is internal cache metadata,
-    /// not a security or synchronization clock.
     pub last_accessed_at: String,
 }
 
@@ -95,12 +93,23 @@ impl LocalStore {
         .collect()
     }
 
-    /// Atomically transitions one synchronized, remote-backed skill to
-    /// `remote_only` before CacheManager deletes any local immutable blobs.
-    ///
-    /// This ordering intentionally prefers leaked cache bytes over an incorrect
-    /// "synced and local" database state after a process crash. The expected
-    /// hash prevents evicting a newer snapshot that raced the LRU decision.
+    /// Returns snapshot payloads that are still required to complete or resolve
+    /// an outbox mutation. CacheManager must treat every returned hash as a
+    /// strong root even when it is no longer the skill's current snapshot.
+    pub fn list_unacked_mutation_payload_hashes(&self) -> Result<Vec<String>, LocalStoreError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection.prepare(
+            r#"
+            SELECT DISTINCT payload_hash
+            FROM local_mutations
+            WHERE state <> 'acked'
+            ORDER BY payload_hash ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn claim_skill_for_eviction(
         &self,
         skill_id: &str,

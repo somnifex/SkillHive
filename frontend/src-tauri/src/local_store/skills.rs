@@ -5,9 +5,13 @@ use rusqlite::OptionalExtension;
 use super::{LocalSkill, LocalStore, LocalStoreError, SkillSyncState};
 
 impl LocalStore {
+    /// Reads a local skill and updates its local cache access timestamp.
+    ///
+    /// `last_accessed_at` is deliberately local-only metadata. It never
+    /// participates in sync conflict resolution or authorization decisions.
     pub fn get_skill(&self, skill_id: &str) -> Result<Option<LocalSkill>, LocalStoreError> {
         let connection = self.lock_connection()?;
-        connection
+        let row = connection
             .query_row(
                 r#"
                 SELECT id, remote_id, name, slug, workspace_path, current_blob_hash,
@@ -31,20 +35,27 @@ impl LocalStore {
                     ))
                 },
             )
-            .optional()?
-            .map(|row| {
-                Ok(LocalSkill {
-                    id: row.0,
-                    remote_id: row.1,
-                    name: row.2,
-                    slug: row.3,
-                    workspace_path: PathBuf::from(row.4),
-                    current_blob_hash: row.5,
-                    remote_revision: row.6,
-                    sync_state: SkillSyncState::from_db_str(&row.7)?,
-                    pinned: row.8,
-                })
-            })
-            .transpose()
+            .optional()?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        connection.execute(
+            "UPDATE local_skills SET last_accessed_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            [skill_id],
+        )?;
+
+        Ok(Some(LocalSkill {
+            id: row.0,
+            remote_id: row.1,
+            name: row.2,
+            slug: row.3,
+            workspace_path: PathBuf::from(row.4),
+            current_blob_hash: row.5,
+            remote_revision: row.6,
+            sync_state: SkillSyncState::from_db_str(&row.7)?,
+            pinned: row.8,
+        }))
     }
 }

@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -53,7 +54,6 @@ pub fn enforce_cache_budget(
         skipped_skills: Vec::new(),
         diagnostics: Vec::new(),
     };
-
     if before_bytes <= policy.max_bytes {
         return Ok(report);
     }
@@ -63,10 +63,6 @@ pub fn enforce_cache_budget(
         .map(|deployment| deployment.skill_id.clone())
         .collect();
 
-    // Count snapshot roots, not just unique hashes. Two skills can legally share
-    // an identical immutable snapshot; an outbox mutation can also reference an
-    // older snapshot no longer current on any skill. Every reference contributes
-    // one unit so evicting one skill can never delete another owner's bytes.
     let mut snapshot_reference_counts: HashMap<String, usize> = HashMap::new();
     for skill in &skills {
         if skill.sync_state != SkillSyncState::RemoteOnly {
@@ -140,7 +136,9 @@ pub fn enforce_cache_budget(
             continue;
         };
 
-        if skill.workspace_path.exists() {
+        // Recheck immediately before the durable DB claim. Any metadata error
+        // other than NotFound is treated as "may exist" and protects the skill.
+        if path_may_exist(&skill.workspace_path) {
             report.skipped_skills.push(skill.skill_id);
             continue;
         }
@@ -159,7 +157,6 @@ pub fn enforce_cache_budget(
             if *count != 0 {
                 continue;
             }
-
             let Some(entry) = inventory_by_hash.get(&hash) else {
                 continue;
             };
@@ -177,8 +174,6 @@ pub fn enforce_cache_budget(
         }
     }
 
-    // Orphan sweeping is intentionally disabled if even one referenced manifest
-    // is unreadable. In that state we cannot prove which file blobs are live.
     if report.after_bytes > policy.max_bytes && unresolved_snapshots.is_empty() {
         let referenced: HashSet<&str> = reference_counts
             .iter()
@@ -219,7 +214,15 @@ fn is_evictable(skill: &CacheSkillRecord, deployed_skill_ids: &HashSet<String>) 
         && !skill.pinned
         && skill.remote_id.is_some()
         && !deployed_skill_ids.contains(&skill.skill_id)
-        && !skill.workspace_path.exists()
+        && !path_may_exist(&skill.workspace_path)
+}
+
+fn path_may_exist(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 fn snapshot_closure(
@@ -237,15 +240,21 @@ fn snapshot_closure(
 
 fn scan_blob_inventory(root: &Path) -> Result<Vec<BlobInventoryEntry>, CacheManagerError> {
     let sha_root = root.join("sha256");
-    if !sha_root.exists() {
-        return Ok(Vec::new());
+    let metadata = match fs::symlink_metadata(&sha_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(CacheManagerError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CacheManagerError::UnsafeBlobDirectory(sha_root));
     }
 
     let mut inventory = Vec::new();
     for prefix_entry in fs::read_dir(&sha_root)? {
         let prefix_entry = prefix_entry?;
         let prefix_path = prefix_entry.path();
-        if !prefix_entry.file_type()?.is_dir() {
+        let prefix_metadata = fs::symlink_metadata(&prefix_path)?;
+        if prefix_metadata.file_type().is_symlink() || !prefix_metadata.is_dir() {
             continue;
         }
         let prefix = prefix_entry.file_name().to_string_lossy().to_string();
@@ -253,20 +262,21 @@ fn scan_blob_inventory(root: &Path) -> Result<Vec<BlobInventoryEntry>, CacheMana
             continue;
         }
 
-        for blob_entry in fs::read_dir(prefix_path)? {
+        for blob_entry in fs::read_dir(&prefix_path)? {
             let blob_entry = blob_entry?;
-            if !blob_entry.file_type()?.is_file() {
+            let blob_path = blob_entry.path();
+            let blob_metadata = fs::symlink_metadata(&blob_path)?;
+            if blob_metadata.file_type().is_symlink() || !blob_metadata.is_file() {
                 continue;
             }
             let digest = blob_entry.file_name().to_string_lossy().to_string();
             if digest.len() != 64 || !is_lower_hex(&digest) || !digest.starts_with(&prefix) {
                 continue;
             }
-            let metadata = blob_entry.metadata()?;
             inventory.push(BlobInventoryEntry {
                 hash: format!("sha256:{digest}"),
-                path: blob_entry.path(),
-                size_bytes: metadata.len(),
+                path: blob_path,
+                size_bytes: blob_metadata.len(),
             });
         }
     }
@@ -294,14 +304,26 @@ fn remove_blob_file(
         });
     }
 
-    match fs::remove_file(expected_path) {
-        Ok(()) => {
-            sync_parent(expected_path.parent())?;
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(CacheManagerError::Io(error)),
+    let parent = expected_path
+        .parent()
+        .ok_or_else(|| CacheManagerError::UnsafeBlobDirectory(expected_path.to_path_buf()))?;
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(CacheManagerError::UnsafeBlobDirectory(parent.to_path_buf()));
     }
+
+    let entry_metadata = match fs::symlink_metadata(expected_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(CacheManagerError::Io(error)),
+    };
+    if entry_metadata.file_type().is_symlink() || !entry_metadata.is_file() {
+        return Err(CacheManagerError::UnsafeBlobEntry(expected_path.to_path_buf()));
+    }
+
+    fs::remove_file(expected_path)?;
+    sync_parent(Some(parent))?;
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -330,6 +352,10 @@ pub enum CacheManagerError {
     Snapshot(#[from] SnapshotError),
     #[error("cache size overflow")]
     SizeOverflow,
+    #[error("unsafe blob cache directory: {0:?}")]
+    UnsafeBlobDirectory(PathBuf),
+    #[error("unsafe blob cache entry: {0:?}")]
+    UnsafeBlobEntry(PathBuf),
     #[error("blob inventory path mismatch for {hash}: expected {expected:?}, got {actual:?}")]
     InventoryPathMismatch {
         hash: String,

@@ -134,6 +134,7 @@ def _skill(
             Skill.skill_type == skill_type,
         )
     )
+    created_skill = skill is None
     if skill is None:
         skill = Skill(
             name=name,
@@ -144,6 +145,7 @@ def _skill(
             category=category,
             tags=tags,
             status="published",
+            sync_revision=1,
             created_by=creator.id,
         )
         session.add(skill)
@@ -155,11 +157,15 @@ def _skill(
         )
     )
     if version is None:
+        revision = 1 if created_skill else max(1, skill.sync_revision + 1)
         version = SkillVersion(
             skill_id=skill.id,
             version="1.0.0",
+            revision=revision,
             content={**DEFAULT_CONTENT, "instructions": instructions},
             manifest={"name": slug, "schema_version": 1},
+            package_manifest_hash=None,
+            package_size_bytes=None,
             dependency_config={},
             change_log="Initial example version",
             status="published",
@@ -167,7 +173,9 @@ def _skill(
         )
         session.add(version)
         session.flush()
+        skill.sync_revision = revision
     skill.current_version_id = version.id
+    skill.current_package_hash = version.package_manifest_hash
     return skill
 
 

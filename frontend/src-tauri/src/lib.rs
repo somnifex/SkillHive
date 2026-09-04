@@ -8,6 +8,7 @@ pub mod skill_snapshot;
 pub mod snapshot_verifier;
 pub mod sync;
 pub mod uninstall;
+pub mod workspace;
 
 use std::{path::PathBuf, sync::Mutex};
 
@@ -25,6 +26,7 @@ use skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotPolicy};
 use snapshot_verifier::verify_materialized_snapshot;
 use tauri::Manager;
 use uninstall::{UninstallEngine, UninstallRequest};
+use workspace::{WorkspaceRef, WorkspaceStore};
 
 #[derive(Debug, Default)]
 pub struct DesktopMutationCoordinator {
@@ -64,12 +66,18 @@ pub struct SaveAgentProfileRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateSkillWorkspaceRequest {
+    pub skill_id: String,
+    pub initial_skill_md: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommitLocalSkillWorkspaceRequest {
     pub skill_id: String,
     pub remote_id: Option<String>,
     pub name: String,
     pub slug: String,
-    pub workspace_path: PathBuf,
     pub base_revision: Option<i64>,
     pub operation: MutationOperation,
 }
@@ -80,6 +88,14 @@ pub struct CommitLocalSkillWorkspaceResult {
     pub skill: LocalSkill,
     pub snapshot: SkillSnapshotRef,
     pub mutation: LocalMutation,
+    pub cache_enforcement: Option<CacheEnforcementReport>,
+    pub cache_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseSkillWorkspaceResult {
+    pub released: bool,
     pub cache_enforcement: Option<CacheEnforcementReport>,
     pub cache_error: Option<String>,
 }
@@ -111,8 +127,6 @@ pub struct UninstallSkillFromAgentResult {
     pub skill_id: String,
     pub agent_profile_id: String,
     pub target_existed: bool,
-    /// True when SQLite is already correct but quarantine/journal cleanup must
-    /// be retried by startup recovery.
     pub recovery_pending: bool,
 }
 
@@ -164,10 +178,34 @@ fn save_agent_profile(
 }
 
 #[tauri::command]
+fn create_skill_workspace(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    workspaces: tauri::State<'_, WorkspaceStore>,
+    request: CreateSkillWorkspaceRequest,
+) -> Result<WorkspaceRef, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    workspaces
+        .create(&request.skill_id, &request.initial_skill_md)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_skill_workspace(
+    workspaces: tauri::State<'_, WorkspaceStore>,
+    skill_id: String,
+) -> Result<Option<WorkspaceRef>, String> {
+    workspaces.get(&skill_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn commit_local_skill_workspace(
     coordinator: tauri::State<'_, DesktopMutationCoordinator>,
     store: tauri::State<'_, LocalStore>,
     blobs: tauri::State<'_, BlobStore>,
+    workspaces: tauri::State<'_, WorkspaceStore>,
     request: CommitLocalSkillWorkspaceRequest,
 ) -> Result<CommitLocalSkillWorkspaceResult, String> {
     let _guard = coordinator
@@ -179,7 +217,11 @@ fn commit_local_skill_workspace(
         return Err("workspace commit does not accept delete; deletion uses the tombstone path".to_owned());
     }
 
-    let snapshot = capture_workspace(&blobs, &request.workspace_path, SnapshotPolicy::default())
+    let workspace = workspaces
+        .get(&request.skill_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("managed workspace not found for skill {}", request.skill_id))?;
+    let snapshot = capture_workspace(&blobs, &workspace.path, SnapshotPolicy::default())
         .map_err(|error| error.to_string())?;
     let mutation = store
         .commit_skill_edit(CommitSkillEdit {
@@ -187,7 +229,7 @@ fn commit_local_skill_workspace(
             remote_id: request.remote_id,
             name: request.name,
             slug: request.slug,
-            workspace_path: request.workspace_path,
+            workspace_path: workspace.path,
             blob_hash: snapshot.manifest_hash.clone(),
             base_revision: request.base_revision,
             operation: request.operation,
@@ -198,15 +240,63 @@ fn commit_local_skill_workspace(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("skill disappeared after local commit: {}", request.skill_id))?;
 
-    let (cache_enforcement, cache_error) = match enforce_cache_budget(&store, &blobs) {
-        Ok(report) => (Some(report), None),
-        Err(error) => (None, Some(error.to_string())),
-    };
-
+    let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
     Ok(CommitLocalSkillWorkspaceResult {
         skill,
         snapshot,
         mutation,
+        cache_enforcement,
+        cache_error,
+    })
+}
+
+#[tauri::command]
+fn release_skill_workspace(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+    workspaces: tauri::State<'_, WorkspaceStore>,
+    skill_id: String,
+) -> Result<ReleaseSkillWorkspaceResult, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+
+    let skill = store
+        .get_skill(&skill_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("skill not found: {skill_id}"))?;
+    if skill.sync_state != SkillSyncState::Synced || skill.remote_id.is_none() {
+        return Err(format!(
+            "workspace for skill {skill_id} cannot be released before the current snapshot is synchronized"
+        ));
+    }
+
+    let Some(workspace) = workspaces.get(&skill_id).map_err(|error| error.to_string())? else {
+        let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
+        return Ok(ReleaseSkillWorkspaceResult {
+            released: false,
+            cache_enforcement,
+            cache_error,
+        });
+    };
+    if workspace.path != skill.workspace_path {
+        return Err("local skill workspace path does not match the managed workspace root".to_owned());
+    }
+
+    let current = capture_workspace(&blobs, &workspace.path, SnapshotPolicy::default())
+        .map_err(|error| error.to_string())?;
+    if current.manifest_hash != skill.current_blob_hash {
+        return Err("workspace contains uncommitted changes and cannot be released".to_owned());
+    }
+
+    let released = workspaces
+        .remove(&skill_id)
+        .map_err(|error| error.to_string())?;
+    let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
+    Ok(ReleaseSkillWorkspaceResult {
+        released,
         cache_enforcement,
         cache_error,
     })
@@ -326,9 +416,6 @@ fn uninstall_skill_from_agent(
         })
         .map_err(|error| error.to_string())?;
 
-    // The guarded delete matches both path and snapshot hash. On any DB error,
-    // leave the uninstall journal intact; startup reads the authoritative catalog
-    // and chooses rollback vs finalize instead of guessing whether commit landed.
     store
         .remove_deployment_catalog(
             &deployment.skill_id,
@@ -386,6 +473,16 @@ fn desktop_startup_status(
     status: tauri::State<'_, DesktopStartupStatus>,
 ) -> DesktopStartupStatus {
     status.inner().clone()
+}
+
+fn cache_attempt(
+    store: &LocalStore,
+    blobs: &BlobStore,
+) -> (Option<CacheEnforcementReport>, Option<String>) {
+    match enforce_cache_budget(store, blobs) {
+        Ok(report) => (Some(report), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
 }
 
 fn discover_and_reconcile_agents(
@@ -520,6 +617,7 @@ pub fn run() {
             let store = LocalStore::open(data_dir.join("skillhive.sqlite3"))?;
             let recovered_in_flight_mutations = store.recover_in_flight_mutations()?;
             let blobs = BlobStore::open(data_dir.join("blobs"))?;
+            let workspaces = WorkspaceStore::open(data_dir.join("workspaces"))?;
             let deployment = DeploymentEngine::open(data_dir.join("deployment-journal"))?;
             let uninstall = UninstallEngine::open(data_dir.join("uninstall-journal"))?;
             let mut deployment_recovery = deployment.recover_incomplete()?;
@@ -583,14 +681,12 @@ pub fn run() {
                 })
                 .collect();
 
-            let (cache_enforcement, cache_error) = match enforce_cache_budget(&store, &blobs) {
-                Ok(report) => (Some(report), None),
-                Err(error) => (None, Some(error.to_string())),
-            };
+            let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
             let local_store = store.health()?;
 
             app.manage(store);
             app.manage(blobs);
+            app.manage(workspaces);
             app.manage(deployment);
             app.manage(uninstall);
             app.manage(registry);
@@ -611,7 +707,10 @@ pub fn run() {
             discover_agents,
             list_agent_profiles,
             save_agent_profile,
+            create_skill_workspace,
+            get_skill_workspace,
             commit_local_skill_workspace,
+            release_skill_workspace,
             deploy_skill_to_agent,
             uninstall_skill_from_agent,
             enforce_local_cache,

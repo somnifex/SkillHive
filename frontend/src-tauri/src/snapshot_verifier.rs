@@ -11,13 +11,6 @@ use crate::{
     skill_snapshot::{read_manifest, SkillSnapshotRef, SnapshotError},
 };
 
-/// Verifies that a materialized skill directory is exactly the immutable
-/// snapshot referenced by `manifest_hash`.
-///
-/// The verifier rejects symlinks, unsupported file types, missing files, extra
-/// files, size changes, and content changes. It is used before committing the
-/// deployment catalog and again during crash recovery before replaying a
-/// filesystem result into SQLite.
 pub fn verify_materialized_snapshot(
     blobs: &BlobStore,
     manifest_hash: &str,
@@ -50,7 +43,10 @@ pub fn verify_materialized_snapshot(
             });
         }
 
-        let metadata = fs::metadata(&actual_file)?;
+        let metadata = fs::symlink_metadata(&actual_file)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(SnapshotVerificationError::UnsupportedFileType(actual_file));
+        }
         if metadata.len() != expected.size_bytes {
             return Err(SnapshotVerificationError::SizeMismatch {
                 path: expected.path.clone(),
@@ -59,7 +55,7 @@ pub fn verify_materialized_snapshot(
             });
         }
 
-        let actual_hash = hash_file(&actual_file)?;
+        let actual_hash = hash_file_stable(&actual_file, expected.size_bytes)?;
         if actual_hash != expected.blob_hash {
             return Err(SnapshotVerificationError::HashMismatch {
                 path: expected.path.clone(),
@@ -139,17 +135,44 @@ fn relative_to_portable_path(path: &Path) -> Result<String, SnapshotVerification
     Ok(parts.join("/"))
 }
 
-fn hash_file(path: &Path) -> Result<String, SnapshotVerificationError> {
+fn hash_file_stable(
+    path: &Path,
+    expected_size: u64,
+) -> Result<String, SnapshotVerificationError> {
+    let before = fs::symlink_metadata(path)?;
+    if before.file_type().is_symlink() || !before.is_file() || before.len() != expected_size {
+        return Err(SnapshotVerificationError::SourceChangedDuringVerification(
+            path.to_path_buf(),
+        ));
+    }
+
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
+        total = total
+            .checked_add(read as u64)
+            .ok_or(SnapshotVerificationError::SizeOverflow)?;
         hasher.update(&buffer[..read]);
     }
+    if total != expected_size {
+        return Err(SnapshotVerificationError::SourceChangedDuringVerification(
+            path.to_path_buf(),
+        ));
+    }
+
+    let after = fs::symlink_metadata(path)?;
+    if after.file_type().is_symlink() || !after.is_file() || after.len() != expected_size {
+        return Err(SnapshotVerificationError::SourceChangedDuringVerification(
+            path.to_path_buf(),
+        ));
+    }
+
     let digest = hasher.finalize();
     let mut output = String::from("sha256:");
     for byte in digest {
@@ -167,16 +190,18 @@ pub enum SnapshotVerificationError {
     Blob(#[from] BlobStoreError),
     #[error("snapshot error: {0}")]
     Snapshot(#[from] SnapshotError),
-    #[error("invalid materialized snapshot root: {0}")]
+    #[error("invalid materialized snapshot root: {0:?}")]
     InvalidRoot(PathBuf),
-    #[error("symbolic links are not allowed in deployed snapshots: {0}")]
+    #[error("symbolic links are not allowed in deployed snapshots: {0:?}")]
     SymlinkNotAllowed(PathBuf),
-    #[error("unsupported file type in deployed snapshot: {0}")]
+    #[error("unsupported file type in deployed snapshot: {0:?}")]
     UnsupportedFileType(PathBuf),
-    #[error("deployed path escaped snapshot root: {0}")]
+    #[error("deployed path escaped snapshot root: {0:?}")]
     PathEscapedRoot(PathBuf),
-    #[error("path is not valid UTF-8: {0}")]
+    #[error("path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),
+    #[error("deployed file changed during verification: {0:?}")]
+    SourceChangedDuringVerification(PathBuf),
     #[error("invalid deployed relative path: {0}")]
     InvalidPath(String),
     #[error("deployed file set mismatch: expected {expected} files, got {actual}")]

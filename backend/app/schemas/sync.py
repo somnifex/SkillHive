@@ -103,11 +103,15 @@ class SyncMutationRequest(SyncModel):
         elif self.operation == "update":
             if self.remote_skill_id is None or self.base_revision is None:
                 raise ValueError("update mutation requires remoteSkillId and baseRevision")
+            if self.base_revision < 1:
+                raise ValueError("update mutation baseRevision must be positive")
             if self.package_manifest_hash is None or self.metadata is None:
                 raise ValueError("update mutation requires packageManifestHash and metadata")
         else:
             if self.remote_skill_id is None or self.base_revision is None:
                 raise ValueError("delete mutation requires remoteSkillId and baseRevision")
+            if self.base_revision < 1:
+                raise ValueError("delete mutation baseRevision must be positive")
             if self.package_manifest_hash is not None:
                 raise ValueError("delete mutation must not include packageManifestHash")
         return self
@@ -115,13 +119,13 @@ class SyncMutationRequest(SyncModel):
 
 class SyncMutationResult(SyncModel):
     remote_skill_id: str = Field(max_length=36)
-    revision: int = Field(ge=0)
+    revision: int = Field(ge=1)
     package_manifest_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
 
 
 class SyncConflictHead(SyncModel):
     remote_skill_id: str = Field(max_length=36)
-    revision: int = Field(ge=0)
+    revision: int = Field(ge=1)
     package_manifest_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -141,12 +145,24 @@ class SyncMutationResponse(SyncModel):
     message: str | None = Field(default=None, max_length=1000)
     retryable: bool = False
 
+    @model_validator(mode="after")
+    def validate_status_shape(self) -> Self:
+        if self.status == "acked":
+            if self.result is None or self.conflict is not None or self.error_code is not None:
+                raise ValueError("acked response requires only a result payload")
+        elif self.status == "conflict":
+            if self.conflict is None or self.result is not None:
+                raise ValueError("conflict response requires conflict head and no result")
+        elif self.result is not None or self.conflict is not None:
+            raise ValueError("error response must not include result or conflict payload")
+        return self
+
 
 class SyncChangeItem(SyncModel):
     sequence: int = Field(ge=1)
     resource_type: Literal["skill"] = "skill"
     resource_id: str = Field(max_length=36)
-    resource_revision: int = Field(ge=0)
+    resource_revision: int = Field(ge=1)
     operation: Literal["upsert", "delete"]
     package_manifest_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -166,4 +182,4 @@ class SyncErrorResponse(SyncModel):
     error_code: str = Field(max_length=80)
     message: str = Field(max_length=1000)
     retryable: bool
-    current_revision: int | None = Field(default=None, ge=0)
+    current_revision: int | None = Field(default=None, ge=1)

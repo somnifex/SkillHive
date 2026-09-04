@@ -10,6 +10,7 @@ use crate::blob_store::{BlobStore, BlobStoreError};
 
 const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 const SKILL_ENTRYPOINT: &str = "SKILL.md";
+const MAX_PORTABLE_SEGMENT_BYTES: usize = 255;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SnapshotPolicy {
@@ -71,12 +72,11 @@ pub fn capture_workspace(
     let mut total_bytes = 0_u64;
     let mut files = Vec::with_capacity(source_files.len());
     for (relative, source) in source_files {
-        let metadata = fs::metadata(&source)?;
-        let size = metadata.len();
+        let bytes = read_regular_file_stable(&source)?;
+        let size = u64::try_from(bytes.len()).map_err(|_| SnapshotError::SizeOverflow)?;
         enforce_file_size(&source, size, policy)?;
         total_bytes = add_and_enforce_total(total_bytes, size, policy)?;
 
-        let bytes = fs::read(&source)?;
         let blob = blobs.put_bytes(&bytes)?;
         files.push(SkillSnapshotFile {
             path: relative,
@@ -152,7 +152,7 @@ pub fn materialize_snapshot_with_policy(
             let parent = target
                 .parent()
                 .ok_or_else(|| SnapshotError::InvalidManifestPath(file.path.clone()))?;
-            fs::create_dir_all(parent)?;
+            create_materialization_parent(destination, parent)?;
 
             let bytes = blobs.read_bytes(&file.blob_hash)?;
             if bytes.len() as u64 != file.size_bytes {
@@ -179,7 +179,7 @@ pub fn materialize_snapshot_with_policy(
     })();
 
     if result.is_err() {
-        fs::remove_dir_all(destination).ok();
+        remove_tree_without_following_symlinks(destination).ok();
     }
     result
 }
@@ -219,6 +219,23 @@ fn collect_files(
         output.push((relative_to_portable_path(relative)?, path));
     }
     Ok(())
+}
+
+fn read_regular_file_stable(path: &Path) -> Result<Vec<u8>, SnapshotError> {
+    let before = fs::symlink_metadata(path)?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err(SnapshotError::UnsupportedFileType(path.to_path_buf()));
+    }
+    let bytes = fs::read(path)?;
+    let after = fs::symlink_metadata(path)?;
+    if after.file_type().is_symlink() || !after.is_file() {
+        return Err(SnapshotError::SourceChangedDuringCapture(path.to_path_buf()));
+    }
+    let byte_len = u64::try_from(bytes.len()).map_err(|_| SnapshotError::SizeOverflow)?;
+    if before.len() != byte_len || after.len() != byte_len {
+        return Err(SnapshotError::SourceChangedDuringCapture(path.to_path_buf()));
+    }
+    Ok(bytes)
 }
 
 fn validate_workspace_root(path: &Path) -> Result<(), SnapshotError> {
@@ -313,9 +330,7 @@ fn relative_to_portable_path(path: &Path) -> Result<String, SnapshotError> {
                 let value = value
                     .to_str()
                     .ok_or_else(|| SnapshotError::NonUtf8Path(path.to_path_buf()))?;
-                if value.is_empty() {
-                    return Err(SnapshotError::InvalidManifestPath(path.display().to_string()));
-                }
+                validate_portable_segment(value)?;
                 parts.push(value.to_owned());
             }
             _ => return Err(SnapshotError::InvalidManifestPath(path.display().to_string())),
@@ -333,15 +348,42 @@ fn portable_path_to_relative(value: &str) -> Result<PathBuf, SnapshotError> {
     }
     let mut result = PathBuf::new();
     for part in value.split('/') {
-        if part.is_empty() || part == "." || part == ".." {
-            return Err(SnapshotError::InvalidManifestPath(value.to_owned()));
-        }
+        validate_portable_segment(part)?;
         result.push(part);
     }
     if result.is_absolute() {
         return Err(SnapshotError::InvalidManifestPath(value.to_owned()));
     }
     Ok(result)
+}
+
+fn validate_portable_segment(value: &str) -> Result<(), SnapshotError> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.as_bytes().len() > MAX_PORTABLE_SEGMENT_BYTES
+        || value.ends_with(' ')
+        || value.ends_with('.')
+        || value.chars().any(|character| {
+            character.is_control()
+                || matches!(character, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*')
+        })
+    {
+        return Err(SnapshotError::InvalidManifestPath(value.to_owned()));
+    }
+
+    let stem = value.split('.').next().unwrap_or(value).to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem
+            .strip_prefix("COM")
+            .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+        || stem
+            .strip_prefix("LPT")
+            .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+    if reserved {
+        return Err(SnapshotError::InvalidManifestPath(value.to_owned()));
+    }
+    Ok(())
 }
 
 fn is_canonical_sha256(value: &str) -> bool {
@@ -352,6 +394,48 @@ fn is_canonical_sha256(value: &str) -> bool {
         && digest
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn create_materialization_parent(root: &Path, parent: &Path) -> Result<(), SnapshotError> {
+    let relative = parent
+        .strip_prefix(root)
+        .map_err(|_| SnapshotError::PathEscapedRoot(parent.to_path_buf()))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(segment) = component else {
+            return Err(SnapshotError::InvalidManifestPath(
+                relative.display().to_string(),
+            ));
+        };
+        current.push(segment);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(SnapshotError::UnsafeMaterializationPath(current));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&current)?,
+            Err(error) => return Err(SnapshotError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn remove_tree_without_following_symlinks(path: &Path) -> Result<(), SnapshotError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(SnapshotError::UnsupportedFileType(path.to_path_buf()));
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        remove_tree_without_following_symlinks(&entry.path())?;
+    }
+    fs::remove_dir(path)?;
+    Ok(())
 }
 
 fn sync_tree_directories(root: &Path) -> Result<(), SnapshotError> {
@@ -384,21 +468,23 @@ pub enum SnapshotError {
     Blob(#[from] BlobStoreError),
     #[error("snapshot manifest serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error("invalid workspace: {0}")]
+    #[error("invalid workspace: {0:?}")]
     InvalidWorkspace(PathBuf),
-    #[error("missing or invalid SKILL.md: {0}")]
+    #[error("missing or invalid SKILL.md: {0:?}")]
     MissingEntrypoint(PathBuf),
-    #[error("symbolic links are not allowed in managed skill snapshots: {0}")]
+    #[error("symbolic links are not allowed in managed skill snapshots: {0:?}")]
     SymlinkNotAllowed(PathBuf),
-    #[error("unsupported file type in skill snapshot: {0}")]
+    #[error("unsupported file type in skill snapshot: {0:?}")]
     UnsupportedFileType(PathBuf),
-    #[error("skill path escaped workspace root: {0}")]
+    #[error("skill path escaped workspace root: {0:?}")]
     PathEscapedRoot(PathBuf),
-    #[error("path is not valid UTF-8: {0}")]
+    #[error("path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),
+    #[error("source file changed while snapshot was being captured: {0:?}")]
+    SourceChangedDuringCapture(PathBuf),
     #[error("snapshot has more than {limit} files")]
     TooManyFiles { limit: usize },
-    #[error("file {path} has {size} bytes, exceeding limit {limit}")]
+    #[error("file {path:?} has {size} bytes, exceeding limit {limit}")]
     FileTooLarge { path: PathBuf, size: u64, limit: u64 },
     #[error("snapshot size {size} exceeds limit {limit}")]
     SnapshotTooLarge { size: u64, limit: u64 },
@@ -412,10 +498,12 @@ pub enum SnapshotError {
     ManifestNotStrictlySorted,
     #[error("invalid blob hash in snapshot manifest: {0}")]
     InvalidBlobHash(String),
-    #[error("snapshot materialization destination already exists: {0}")]
+    #[error("snapshot materialization destination already exists: {0:?}")]
     DestinationExists(PathBuf),
-    #[error("snapshot materialization destination must be absolute: {0}")]
+    #[error("snapshot materialization destination must be absolute: {0:?}")]
     InvalidDestination(PathBuf),
+    #[error("unsafe materialization path: {0:?}")]
+    UnsafeMaterializationPath(PathBuf),
     #[error("blob size mismatch for {path}: expected {expected}, got {actual}")]
     BlobSizeMismatch {
         path: String,
@@ -485,6 +573,13 @@ mod tests {
             validate_manifest(&manifest, SnapshotPolicy::default()),
             Err(SnapshotError::InvalidManifestPath(_))
         ));
+    }
+
+    #[test]
+    fn manifest_rejects_nonportable_windows_names() {
+        for path in ["CON", "scripts/a:b.py", "trailing."] {
+            assert!(portable_path_to_relative(path).is_err(), "{path}");
+        }
     }
 
     #[test]

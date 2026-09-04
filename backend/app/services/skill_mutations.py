@@ -46,6 +46,7 @@ class SkillMutationService:
         change_log: str,
         version_status: str,
         audit_action: str,
+        audit_after_data: Mapping[str, Any] | None = None,
     ) -> tuple[Skill, SkillVersion]:
         skill = Skill(
             name=name.strip(),
@@ -72,13 +73,19 @@ class SkillMutationService:
         )
         skill.current_version_id = created_version.id
 
+        after_data: dict[str, Any] = {
+            "name": skill.name,
+            "version": created_version.version,
+        }
+        if audit_after_data is not None:
+            after_data.update(audit_after_data)
         write_audit(
             self.session,
             actor_user_id=self.actor_user_id,
             action=audit_action,
             resource_type="skill",
             resource_id=skill.id,
-            after_data={"name": skill.name, "version": created_version.version},
+            after_data=after_data,
         )
         return skill, created_version
 

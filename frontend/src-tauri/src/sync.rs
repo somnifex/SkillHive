@@ -263,19 +263,30 @@ fn dispatch_mutation(
         Err(error) => {
             // HTTP-level failures: authentication/device failures must NOT
             // touch mutation state (plan §15) — surface them to stop the
-            // cycle. Everything else is transport-grade: persist retryable.
+            // cycle. A 4xx request rejection (permanent validation) must
+            // NOT retry-storm: persist permanent_error. Everything else is
+            // transport-grade: persist retryable.
             if matches!(
                 error,
                 SyncClientError::Authentication { .. } | SyncClientError::NotSignedIn
             ) {
                 return Err(SyncCycleError::Authentication(error));
             }
+            let error_code = error.error_code().unwrap_or("TRANSPORT_ERROR").to_owned();
             let error_message = error.to_string();
-            let outcome = MutationOutcome::transport_error(
-                &mutation.id,
-                error.error_code().unwrap_or("TRANSPORT_ERROR"),
-                &error_message,
-            );
+            let outcome = if matches!(error, SyncClientError::Request { .. }) {
+                MutationOutcome {
+                    mutation_id: mutation.id.clone(),
+                    status: "validation_error".to_owned(),
+                    remote_skill_id: None,
+                    revision: None,
+                    conflict_head_revision: None,
+                    error_code: Some(error_code),
+                    message: Some(error_message),
+                }
+            } else {
+                MutationOutcome::transport_error(&mutation.id, &error_code, &error_message)
+            };
             store.apply_mutation_outcome(&outcome)?;
             Err(SyncCycleError::Failed {
                 stage: "mutation submit",

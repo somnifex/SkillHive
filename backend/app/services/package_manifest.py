@@ -31,9 +31,11 @@ MAX_SEGMENT_BYTES = 255
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_RESERVED_STEMS = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {
-    f"LPT{i}" for i in range(1, 10)
-}
+_RESERVED_STEMS = (
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
 
 
 def _manifest_error(code: str, message: str, status_code: int = 400, **details: Any) -> AppError:
@@ -83,9 +85,7 @@ def validate_snapshot_manifest_bytes(manifest_bytes: bytes) -> list[dict[str, An
     normalized: list[dict[str, Any]] = []
     for entry in files:
         if not isinstance(entry, dict):
-            raise AppError(
-                "MANIFEST_INVALID_ENTRY", "Snapshot file entry must be an object.", 400
-            )
+            raise AppError("MANIFEST_INVALID_ENTRY", "Snapshot file entry must be an object.", 400)
         path = entry.get("path")
         blob_hash = entry.get("blobHash", entry.get("blob_hash"))
         size = entry.get("sizeBytes", entry.get("size_bytes"))

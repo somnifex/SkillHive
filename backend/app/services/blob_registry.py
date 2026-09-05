@@ -33,9 +33,7 @@ def missing_blobs(
     hashes = [descriptor.hash for descriptor in descriptors]
     rows = {
         row.hash: row
-        for row in session.scalars(
-            select(SkillBlobObject).where(SkillBlobObject.hash.in_(hashes))
-        )
+        for row in session.scalars(select(SkillBlobObject).where(SkillBlobObject.hash.in_(hashes)))
     }
 
     missing: list[SyncBlobDescriptor] = []

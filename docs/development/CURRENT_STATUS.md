@@ -38,8 +38,8 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 | M2.1 Protocol/schema foundation (#6) | IN PROGRESS — SQLite-validated; PostgreSQL/MySQL bypassed by owner instruction |
 | M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc outstanding |
 | M2.3 Device identity/secure credentials (#8) | CODE COMPLETE — server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
-| M2.4 Idempotent push (#9) | SERVER COMPLETE — push endpoint + receipt replay validated on SQLite; desktop ACK transaction outstanding |
-| M2.5 Durable pull/change feed (#10) | SERVER COMPLETE — change feed emission + pull endpoint validated on SQLite; desktop pull apply outstanding |
+| M2.4 Idempotent push (#9) | SERVER COMPLETE + DESKTOP TRANSPORT — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed (cargo 63 tests) |
+| M2.5 Durable pull/change feed (#10) | SERVER COMPLETE + DESKTOP PULL APPLY — change feed validated; desktop transactional page apply + cursor commit landed; HTTP pull client + package hydration outstanding |
 | M2.6 Desktop sync orchestrator (#11) | PLANNED (NEXT) |
 | M2.7 Conflicts/reliability checkpoint (#12) | PLANNED |
 | M3 Enterprise offline authorization | PLANNED |
@@ -48,18 +48,15 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 ## Exact next task
 
 Continue the desktop side of the sync milestones on branch `feat/m2-continue`
-(backend push/pull endpoints and the desktop M2.3 boundary are landed):
+(desktop M2.4 transport + durable ACK and M2.5 pull apply are landed):
 
-1. **M2.4 desktop (Issue #9)** — SQLite ACK transaction (mutation ACK, remote
-   ID mapping, remote revision, state transition only when no later mutation
-   exists), blob upload negotiation from the desktop, stable mutation ID
-   retry over `sync_client`.
-2. **M2.5 desktop (Issue #10)** — transactional pull-page apply, package
-   download/hydration, `remote_only` state, cursor commits only after
-   durable apply.
-3. **M2.6 (Issue #11)** — sync orchestrator composing the cycle with
+1. **M2.5 desktop (Issue #10), remainder** — HTTP pull client fetching pages
+   from `GET /api/v1/sync/changes` over `SyncClient`, package download of
+   missing blobs via `GET /api/v1/sync/blobs/{hash}` into the BlobStore,
+   optional workspace hydration via `import_snapshot`.
+2. **M2.6 (Issue #11)** — sync orchestrator composing the cycle with
    persisted backoff; `sync.rs` is still a stub.
-4. **M2.7 (Issue #12)** — conflict persistence, resolution ops, error
+3. **M2.7 (Issue #12)** — conflict persistence, resolution ops, error
    classifier, local reliability validation scenarios.
 
 Outstanding leftovers: M2.2 mark-and-sweep GC design doc (Issue #7);

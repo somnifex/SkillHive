@@ -1,6 +1,6 @@
 # SkillHive Current Development Status
 
-Updated: 2026-09-04
+Updated: 2026-09-05
 
 This file contains the **current dynamic repository state** and supersedes branch/PR metadata captured at the top of `LOCAL_AGENT_HANDOFF.md`.
 
@@ -13,21 +13,19 @@ This file contains the **current dynamic repository state** and supersedes branc
 - Continuation branch name reserved for local-agent takeover: **`feat/m2-sync`**. It should be kept aligned with the latest `main` before development resumes.
 - No GitHub Actions workflow should be added for routine validation unless the owner explicitly changes that policy.
 
-## Active branch for the local agent
+## Local agent branch reality (2026-09-05)
 
-Start from the latest `main`, then work on the continuation branch:
+The active local development branch is **`feat/m2-continue`** (5 commits ahead of `main`, local only):
 
-```bash
-git fetch origin
-git checkout main
-git pull --ff-only origin main
-git checkout feat/m2-sync 2>/dev/null || git checkout -b feat/m2-sync
-git rebase origin/main
+```text
+206205d chore(frontend): pin Tauri CLI and record reproducible registry
+ac94d7a chore: ignore tauri-build generated schemas (gen/)
+298ece4 fix(desktop): repair Rust baseline so check/test/clippy pass on Windows
+67e0fd0 fix(migrations): bind change-feed baseline timestamps dialect-neutrally
+dcedf9a fix(sync): make M2.1 baseline pass local backend validation
 ```
 
-If the remote/local `feat/m2-sync` has no unique development work yet, resetting it to current `main` is acceptable. The important invariant is that M2 work starts from the latest merged handoff state, not from the old `feat/desktop-foundation` branch.
-
-Do not directly develop on `main`.
+It was forked from `feat/m2-sync` after that branch was aligned with latest `main` (merge b9c7257). Treat `feat/m2-continue` as the current continuation branch.
 
 ## Current milestone state
 
@@ -36,9 +34,9 @@ Do not directly develop on `main`.
 | M0 Desktop/architecture foundation | COMPLETE |
 | M1 Durable local desktop core | CODE COMPLETE / PENDING LOCAL VALIDATION |
 | M2 Cloud sync epic (#4) | IN PROGRESS |
-| M2.0 Shared Skill mutation path (#5) | CODE COMPLETE / PENDING LOCAL VALIDATION |
-| M2.1 Protocol/schema foundation (#6) | IN PROGRESS |
-| M2.2 Package/blob storage (#7) | PLANNED |
+| M2.0 Shared Skill mutation path (#5) | CODE COMPLETE — backend validated locally (see validation truth) |
+| M2.1 Protocol/schema foundation (#6) | IN PROGRESS — SQLite-validated; PostgreSQL/MySQL bypassed by owner instruction |
+| M2.2 Package/blob storage (#7) | PLANNED (NEXT) |
 | M2.3 Device identity/secure credentials (#8) | PLANNED |
 | M2.4 Idempotent push (#9) | PLANNED |
 | M2.5 Durable pull/change feed (#10) | PLANNED |
@@ -49,20 +47,14 @@ Do not directly develop on `main`.
 
 ## Exact next task
 
-Continue **M2.1 / Issue #6**.
+Start **M2.2 / Issue #7 (Package storage and transport)**:
+storage backend abstraction, local dev storage backend, S3-compatible
+production backend contract, missing-hash negotiation, verified streaming
+upload/download, and server manifest validation identical in constraints to
+desktop snapshot validation (see `docs/architecture/m2-cloud-sync-plan.md`).
 
-Before starting M2.2, the local agent should make the current M1/M2.0/M2.1 baseline executable and truthful locally:
-
-1. run backend Ruff/mypy/pytest;
-2. run fresh and upgrade-path Alembic validation on SQLite;
-3. run the same M2.1 migration path on PostgreSQL;
-4. make an explicit MySQL support decision and validate it if retained;
-5. run Rust fmt/check/test/clippy;
-6. validate desktop SQLite schema v1 -> v2 -> v3;
-7. validate per-Skill outbox causal ordering;
-8. validate the existing M1 snapshot/deployment/recovery core;
-9. fix any compile/runtime/migration failures before adding M2.2 features;
-10. update Issue #6 and the handoff status when the results are known.
+The baseline-truth work that preceded M2.2 is now done locally (2026-09-05);
+its results and the explicit bypasses are recorded under **Validation truth**.
 
 ## M2.1 already implemented but unverified
 
@@ -84,18 +76,38 @@ Do not interpret these files as verified merely because PR #3 was merged.
 
 ## Validation truth
 
-At this status checkpoint, the previous development session did **not** execute:
+### Validated 2026-09-05 (local agent session, Windows 11 Pro 10.0.26200)
 
-- `ruff`;
-- `mypy`;
-- backend `pytest`;
-- Alembic upgrade against the new migration;
-- PostgreSQL migration validation;
-- Cargo compile/test/clippy;
-- Tauri runtime;
-- M1 filesystem/deployment fault injection.
+Toolchain: Python 3.12.0 (uv-managed venv) · Node v24.14.1 · pnpm 11.9.0 · rustc/cargo 1.94.1
 
-The merge of PR #3 is therefore an integration event, **not a verification certificate**.
+Commands passed on branch `feat/m2-continue` (HEAD 206205d):
+
+- `uv run ruff check backend` — all checks passed
+- `uv run mypy backend/app backend/tests` — 60 files clean (strict)
+- `uv run pytest backend/tests` — 32 passed
+- `cargo fmt --check` — clean
+- `cargo check` / `cargo test` — 31 passed, 0 failed
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean
+- Alembic on SQLite: fresh → head; upgrade path 7f4c2b8a91de → head with representative legacy data; ORM↔migration parity diff 0; idempotent re-run; downgrade both directions
+- Desktop SQLite: fresh install reaches schema v3 via the running app; `local_sync_state` singleton present; WAL active
+- Frontend: `pnpm lint`, `pnpm typecheck`, `pnpm test` (3 passed), `pnpm build` — all green
+- Desktop build: `pnpm exec tauri build --debug --no-bundle` produces `skillhive-desktop.exe`; app launches and creates runtime state (smoke-tested, then state removed)
+- M1 unit-level validation passes via cargo test: snapshot round-trip, blob tamper detection, workspace boundary/ID escape, deployment journal recovery (prepared-new-install rollback, verified catalog ACK), uninstall rollback, agent profile forgery rejection, per-Skill outbox gating (create→update→delete, in-flight claim, restart recovery)
+
+### Known fixes landed to make the baseline truthful
+
+- `dcedf9a` — backend baseline (Literal protocol version, autoflush-safe mutation test, ruff import order)
+- `67e0fd0` — change-feed baseline timestamps bound dialect-neutrally (SQLite returns str from raw SELECT)
+- `298ece4` — desktop baseline (Rust syntax error, `File::by_ref` ambiguity, unix-only `File` imports, clippy fixes, `icons/icon.ico`, Cargo.lock committed)
+- `206205d` — project-pinned `@tauri-apps/cli`, `frontend/.npmrc` registry pin
+
+### Explicitly skipped (owner instruction, do NOT count as verified)
+
+- **PostgreSQL migration validation** — bypassed. Owner instruction (2026-09-04): “暂时绕过所有sql流程” (temporarily bypass all SQL-server flows). WSL/Docker unavailable (owner cancelled WSL install), no local PostgreSQL/MySQL server. Re-validate when a server becomes available.
+- **MySQL support decision** — deferred together with PostgreSQL above.
+- **Interactive Tauri runtime UI testing** — desktop exe launches and initializes its SQLite/blob/journal state (smoke test), but full window interaction was not manually exercised.
+
+The merge of PR #3 remains an integration event, **not** a full verification certificate, but the local executable baseline is now real. M1/M2.0 status above reflects backend + Rust unit-level validation only; fault-injection coverage beyond what `cargo test` covers (PART H scenarios) remains manual/TODO.
 
 Use `docs/development/LOCAL_VALIDATION_CHECKLIST.md` as the verification contract.
 

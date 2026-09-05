@@ -3,12 +3,14 @@ mod deployments;
 mod migrations;
 mod mutations;
 mod outcomes;
+mod pull_apply;
 mod skills;
 mod sync_state;
 mod uninstall;
 
 pub use cache::{CacheSkillRecord, LocalCachePolicy};
 pub use outcomes::{MutationOutcome, OutcomeApplied};
+pub use pull_apply::{ChangeItem, ChangesPage, PageApplied};
 
 use std::{
     fs,

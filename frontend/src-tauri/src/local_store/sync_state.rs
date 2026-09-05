@@ -145,6 +145,28 @@ impl LocalStore {
     }
 }
 
+/// Transaction-scoped cursor advance used by the pull apply transaction:
+/// the page metadata writes and the cursor commit land in ONE SQLite
+/// transaction, so an interrupted apply rolls back both.
+pub(super) fn record_pull_cursor_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    cursor: &str,
+) -> Result<(), LocalStoreError> {
+    validate_non_empty("server_cursor", cursor)?;
+    transaction.execute(
+        r#"
+        UPDATE local_sync_state
+        SET server_cursor = ?1,
+            last_successful_pull_at = CURRENT_TIMESTAMP,
+            last_server_error = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+        "#,
+        params![cursor],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

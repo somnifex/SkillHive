@@ -152,7 +152,9 @@ fn discover_agents(
 fn list_agent_profiles(
     store: tauri::State<'_, LocalStore>,
 ) -> Result<Vec<AgentProfileRecord>, String> {
-    store.list_agent_profiles().map_err(|error| error.to_string())
+    store
+        .list_agent_profiles()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -214,7 +216,9 @@ fn commit_local_skill_workspace(
         .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
 
     if request.operation == MutationOperation::Delete {
-        return Err("workspace commit does not accept delete; deletion uses the tombstone path".to_owned());
+        return Err(
+            "workspace commit does not accept delete; deletion uses the tombstone path".to_owned(),
+        );
     }
 
     let workspace = workspaces
@@ -273,7 +277,10 @@ fn release_skill_workspace(
         ));
     }
 
-    let Some(workspace) = workspaces.get(&skill_id).map_err(|error| error.to_string())? else {
+    let Some(workspace) = workspaces
+        .get(&skill_id)
+        .map_err(|error| error.to_string())?
+    else {
         let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
         return Ok(ReleaseSkillWorkspaceResult {
             released: false,
@@ -282,7 +289,9 @@ fn release_skill_workspace(
         });
     };
     if workspace.path != skill.workspace_path {
-        return Err("local skill workspace path does not match the managed workspace root".to_owned());
+        return Err(
+            "local skill workspace path does not match the managed workspace root".to_owned(),
+        );
     }
 
     let current = capture_workspace(&blobs, &workspace.path, SnapshotPolicy::default())
@@ -430,7 +439,9 @@ fn uninstall_skill_from_agent(
             .err()
             .map(|recovery_error| format!("; immediate recovery failed: {recovery_error}"))
             .unwrap_or_default();
-        return Err(format!("deployment catalog removal failed: {error}{recovery_note}"));
+        return Err(format!(
+            "deployment catalog removal failed: {error}{recovery_note}"
+        ));
     }
 
     let recovery_pending = filesystem
@@ -477,9 +488,7 @@ fn set_local_cache_policy(
 }
 
 #[tauri::command]
-fn desktop_startup_status(
-    status: tauri::State<'_, DesktopStartupStatus>,
-) -> DesktopStartupStatus {
+fn desktop_startup_status(status: tauri::State<'_, DesktopStartupStatus>) -> DesktopStartupStatus {
     status.inner().clone()
 }
 
@@ -579,7 +588,9 @@ fn reconcile_uninstall_recovery(
     store: &LocalStore,
     engine: &UninstallEngine,
 ) -> Result<UninstallStartupReport, String> {
-    let discovered = engine.recover_pending().map_err(|error| error.to_string())?;
+    let discovered = engine
+        .recover_pending()
+        .map_err(|error| error.to_string())?;
     let mut report = UninstallStartupReport {
         discovered: discovered.pending.len(),
         rolled_back: 0,

@@ -160,11 +160,9 @@ impl DeploymentEngine {
 
         // Do not destroy the old known-good target until the newly activated
         // directory proves it is exactly the immutable snapshot.
-        if let Err(error) = verify_materialized_snapshot(
-            blobs,
-            &request.snapshot_hash,
-            &destination,
-        ) {
+        if let Err(error) =
+            verify_materialized_snapshot(blobs, &request.snapshot_hash, &destination)
+        {
             if replaced_existing && path_entry_exists(&backup)? {
                 rollback_active_to_backup(&journal)?;
             } else if path_entry_exists(&destination)? {
@@ -197,13 +195,17 @@ impl DeploymentEngine {
         let journal = read_latest_journal(&journal_path)?;
         validate_journal_paths(&journal)?;
         if journal.transaction_id != transaction_id || journal.phase != DeploymentPhase::Activated {
-            return Err(DeploymentError::CatalogAckRejected(transaction_id.to_owned()));
+            return Err(DeploymentError::CatalogAckRejected(
+                transaction_id.to_owned(),
+            ));
         }
         if !path_is_real_directory(&journal.destination)?
             || path_entry_exists(&journal.staging)?
             || path_entry_exists(&journal.backup)?
         {
-            return Err(DeploymentError::CatalogAckRejected(transaction_id.to_owned()));
+            return Err(DeploymentError::CatalogAckRejected(
+                transaction_id.to_owned(),
+            ));
         }
         verify_materialized_snapshot(blobs, &journal.snapshot_hash, &journal.destination)?;
         self.remove_journal(&journal_path)
@@ -213,10 +215,7 @@ impl DeploymentEngine {
     /// only after the candidate snapshot is cryptographically verified. If a
     /// known-good backup exists and the candidate cannot be proven valid, the
     /// recovery path restores the backup instead.
-    pub fn recover_incomplete(
-        &self,
-        blobs: &BlobStore,
-    ) -> Result<RecoveryReport, DeploymentError> {
+    pub fn recover_incomplete(&self, blobs: &BlobStore) -> Result<RecoveryReport, DeploymentError> {
         ensure_real_directory(&self.journal_root)?;
         let mut report = RecoveryReport {
             recovered: 0,
@@ -264,7 +263,10 @@ impl DeploymentEngine {
         match journal.phase {
             DeploymentPhase::Intent => {
                 if backup_exists {
-                    return Err(unrecoverable(&journal, "backup exists while phase is intent"));
+                    return Err(unrecoverable(
+                        &journal,
+                        "backup exists while phase is intent",
+                    ));
                 }
                 if staging_exists {
                     remove_any(&journal.staging)?;
@@ -319,11 +321,7 @@ impl DeploymentEngine {
                     return self.activate_verified_staging(blobs, journal_path, &mut journal);
                 }
                 if destination_exists && !staging_exists && backup_exists {
-                    return self.verify_active_or_restore_backup(
-                        blobs,
-                        journal_path,
-                        &mut journal,
-                    );
+                    return self.verify_active_or_restore_backup(blobs, journal_path, &mut journal);
                 }
                 if !destination_exists && !staging_exists && backup_exists {
                     restore_backup(&journal)?;
@@ -349,11 +347,7 @@ impl DeploymentEngine {
                         "staging still exists after activation",
                     ));
                 }
-                return self.verify_active_or_restore_backup(
-                    blobs,
-                    journal_path,
-                    &mut journal,
-                );
+                return self.verify_active_or_restore_backup(blobs, journal_path, &mut journal);
             }
         }
 
@@ -372,11 +366,9 @@ impl DeploymentEngine {
         journal_path: &Path,
         journal: &mut DeploymentJournal,
     ) -> Result<RecoveryOutcome, DeploymentError> {
-        if let Err(error) = verify_materialized_snapshot(
-            blobs,
-            &journal.snapshot_hash,
-            &journal.staging,
-        ) {
+        if let Err(error) =
+            verify_materialized_snapshot(blobs, &journal.snapshot_hash, &journal.staging)
+        {
             if path_entry_exists(&journal.backup)? {
                 if path_entry_exists(&journal.staging)? {
                     remove_any(&journal.staging)?;
@@ -419,7 +411,7 @@ impl DeploymentEngine {
                 }
                 Ok(RecoveryOutcome::Committed(journal.result()))
             }
-            Err(error) if path_entry_exists(&journal.backup)? => {
+            Err(_error) if path_entry_exists(&journal.backup)? => {
                 rollback_active_to_backup(journal)?;
                 self.remove_journal(journal_path)?;
                 Ok(RecoveryOutcome::RolledBack)
@@ -475,7 +467,6 @@ impl DeploymentEngine {
         }
         let bytes = serde_json::to_vec(journal)?;
         let mut file = OpenOptions::new()
-            .write(true)
             .append(true)
             .create(true)
             .open(journal_path)?;
@@ -595,12 +586,12 @@ fn validate_directory_name(name: &str) -> Result<(), DeploymentError> {
     }
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || stem
-            .strip_prefix("COM")
-            .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
-        || stem
-            .strip_prefix("LPT")
-            .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+        || stem.strip_prefix("COM").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
+        || stem.strip_prefix("LPT").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        });
     if reserved {
         return Err(DeploymentError::InvalidDirectoryName(name.to_owned()));
     }
@@ -801,8 +792,8 @@ mod tests {
         let workspace = temp.path().join("workspace");
         make_workspace(&workspace, "v1");
         let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
-        let snapshot = capture_workspace(&blobs, &workspace, SnapshotPolicy::default())
-            .expect("snapshot");
+        let snapshot =
+            capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("snapshot");
         let engine = DeploymentEngine::open(temp.path().join("journals")).expect("engine");
 
         let result = engine
@@ -822,8 +813,8 @@ mod tests {
         let workspace = temp.path().join("workspace");
         make_workspace(&workspace, "v1");
         let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
-        let snapshot = capture_workspace(&blobs, &workspace, SnapshotPolicy::default())
-            .expect("snapshot");
+        let snapshot =
+            capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("snapshot");
         let root = temp.path().join("skills");
         fs::create_dir_all(&root).expect("root");
         let staging = root.join(".skillhive-stage-tx1");

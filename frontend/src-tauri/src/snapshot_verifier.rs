@@ -135,10 +135,7 @@ fn relative_to_portable_path(path: &Path) -> Result<String, SnapshotVerification
     Ok(parts.join("/"))
 }
 
-fn hash_file_stable(
-    path: &Path,
-    expected_size: u64,
-) -> Result<String, SnapshotVerificationError> {
+fn hash_file_stable(path: &Path, expected_size: u64) -> Result<String, SnapshotVerificationError> {
     let before = fs::symlink_metadata(path)?;
     if before.file_type().is_symlink() || !before.is_file() || before.len() != expected_size {
         return Err(SnapshotVerificationError::SourceChangedDuringVerification(
@@ -242,10 +239,9 @@ mod tests {
         let materialized = temp.path().join("materialized");
         make_workspace(&workspace);
         let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
-        let snapshot = capture_workspace(&blobs, &workspace, SnapshotPolicy::default())
-            .expect("snapshot");
-        materialize_snapshot(&blobs, &snapshot.manifest_hash, &materialized)
-            .expect("materialize");
+        let snapshot =
+            capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("snapshot");
+        materialize_snapshot(&blobs, &snapshot.manifest_hash, &materialized).expect("materialize");
 
         assert_eq!(
             verify_materialized_snapshot(&blobs, &snapshot.manifest_hash, &materialized)
@@ -261,10 +257,9 @@ mod tests {
         let materialized = temp.path().join("materialized");
         make_workspace(&workspace);
         let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
-        let snapshot = capture_workspace(&blobs, &workspace, SnapshotPolicy::default())
-            .expect("snapshot");
-        materialize_snapshot(&blobs, &snapshot.manifest_hash, &materialized)
-            .expect("materialize");
+        let snapshot =
+            capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("snapshot");
+        materialize_snapshot(&blobs, &snapshot.manifest_hash, &materialized).expect("materialize");
         fs::write(materialized.join("unexpected.txt"), b"changed").expect("write");
 
         assert!(matches!(

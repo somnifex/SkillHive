@@ -53,7 +53,7 @@ impl SkillSyncState {
     }
 }
 
-#[derive(Debug, Clone, Copy,PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOperation {
     Create,
@@ -254,7 +254,10 @@ pub struct LocalStoreHealth {
 impl LocalStore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, LocalStoreError> {
         let db_path = db_path.as_ref().to_path_buf();
-        if let Some(parent) = db_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = db_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)?;
         }
 

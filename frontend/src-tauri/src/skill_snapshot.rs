@@ -231,7 +231,9 @@ fn read_regular_file_stable(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Snap
     let first = read_regular_file_bounded(path, max_bytes)?;
     let second = read_regular_file_bounded(path, max_bytes)?;
     if first != second {
-        return Err(SnapshotError::SourceChangedDuringCapture(path.to_path_buf()));
+        return Err(SnapshotError::SourceChangedDuringCapture(
+            path.to_path_buf(),
+        ));
     }
     Ok(first)
 }
@@ -255,7 +257,9 @@ fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Sna
     let read_limit = max_bytes
         .checked_add(1)
         .ok_or(SnapshotError::SizeOverflow)?;
-    file.by_ref().take(read_limit).read_to_end(&mut bytes)?;
+    std::io::Read::by_ref(&mut file)
+        .take(read_limit)
+        .read_to_end(&mut bytes)?;
     let byte_len = u64::try_from(bytes.len()).map_err(|_| SnapshotError::SizeOverflow)?;
     if byte_len > max_bytes {
         return Err(SnapshotError::FileTooLarge {
@@ -271,7 +275,9 @@ fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Sna
         || before.len() != byte_len
         || after.len() != byte_len
     {
-        return Err(SnapshotError::SourceChangedDuringCapture(path.to_path_buf()));
+        return Err(SnapshotError::SourceChangedDuringCapture(
+            path.to_path_buf(),
+        ));
     }
     Ok(bytes)
 }
@@ -323,16 +329,14 @@ fn validate_manifest(
         total_bytes = add_and_enforce_total(total_bytes, file.size_bytes, policy)?;
     }
     if !has_entrypoint {
-        return Err(SnapshotError::MissingEntrypoint(PathBuf::from(SKILL_ENTRYPOINT)));
+        return Err(SnapshotError::MissingEntrypoint(PathBuf::from(
+            SKILL_ENTRYPOINT,
+        )));
     }
     Ok(())
 }
 
-fn enforce_file_size(
-    path: &Path,
-    size: u64,
-    policy: SnapshotPolicy,
-) -> Result<(), SnapshotError> {
+fn enforce_file_size(path: &Path, size: u64, policy: SnapshotPolicy) -> Result<(), SnapshotError> {
     if size > policy.max_file_bytes {
         return Err(SnapshotError::FileTooLarge {
             path: path.to_path_buf(),
@@ -371,7 +375,11 @@ fn relative_to_portable_path(path: &Path) -> Result<String, SnapshotError> {
                 validate_portable_segment(value)?;
                 parts.push(value.to_owned());
             }
-            _ => return Err(SnapshotError::InvalidManifestPath(path.display().to_string())),
+            _ => {
+                return Err(SnapshotError::InvalidManifestPath(
+                    path.display().to_string(),
+                ))
+            }
         }
     }
     if parts.is_empty() {
@@ -399,7 +407,7 @@ fn validate_portable_segment(value: &str) -> Result<(), SnapshotError> {
     if value.is_empty()
         || value == "."
         || value == ".."
-        || value.as_bytes().len() > MAX_PORTABLE_SEGMENT_BYTES
+        || value.len() > MAX_PORTABLE_SEGMENT_BYTES
         || value.ends_with(' ')
         || value.ends_with('.')
         || value.chars().any(|character| {
@@ -410,14 +418,18 @@ fn validate_portable_segment(value: &str) -> Result<(), SnapshotError> {
         return Err(SnapshotError::InvalidManifestPath(value.to_owned()));
     }
 
-    let stem = value.split('.').next().unwrap_or(value).to_ascii_uppercase();
+    let stem = value
+        .split('.')
+        .next()
+        .unwrap_or(value)
+        .to_ascii_uppercase();
     let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || stem
-            .strip_prefix("COM")
-            .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
-        || stem
-            .strip_prefix("LPT")
-            .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+        || stem.strip_prefix("COM").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
+        || stem.strip_prefix("LPT").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        });
     if reserved {
         return Err(SnapshotError::InvalidManifestPath(value.to_owned()));
     }
@@ -523,7 +535,11 @@ pub enum SnapshotError {
     #[error("snapshot has more than {limit} files")]
     TooManyFiles { limit: usize },
     #[error("file {path:?} has {size} bytes, exceeding limit {limit}")]
-    FileTooLarge { path: PathBuf, size: u64, limit: u64 },
+    FileTooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
+    },
     #[error("snapshot size {size} exceeds limit {limit}")]
     SnapshotTooLarge { size: u64, limit: u64 },
     #[error("snapshot size overflow")]
@@ -567,14 +583,20 @@ mod tests {
         make_workspace(&workspace);
         let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
 
-        let first = capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("capture");
-        let second = capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("capture");
+        let first =
+            capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("capture");
+        let second =
+            capture_workspace(&blobs, &workspace, SnapshotPolicy::default()).expect("capture");
         assert_eq!(first, second);
 
         let output = temp.path().join("materialized");
-        let materialized = materialize_snapshot(&blobs, &first.manifest_hash, &output).expect("materialize");
+        let materialized =
+            materialize_snapshot(&blobs, &first.manifest_hash, &output).expect("materialize");
         assert_eq!(materialized, first);
-        assert_eq!(fs::read(output.join("SKILL.md")).expect("read"), b"# Skill\n");
+        assert_eq!(
+            fs::read(output.join("SKILL.md")).expect("read"),
+            b"# Skill\n"
+        );
         assert_eq!(
             fs::read(output.join("scripts").join("run.py")).expect("read"),
             b"print('ok')\n"

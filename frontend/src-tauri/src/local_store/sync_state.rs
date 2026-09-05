@@ -49,7 +49,6 @@ impl LocalStore {
 
     pub fn record_device_registration(
         &self,
-        *,
         client_instance_id: &str,
         device_id: &str,
         server_user_id: &str,

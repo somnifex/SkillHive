@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -192,9 +191,10 @@ pub fn enforce_cache_budget(
                     report.deleted_blobs += 1;
                 }
                 Ok(false) => {}
-                Err(error) => report
-                    .diagnostics
-                    .push(format!("orphan blob {} could not be deleted: {error}", entry.hash)),
+                Err(error) => report.diagnostics.push(format!(
+                    "orphan blob {} could not be deleted: {error}",
+                    entry.hash
+                )),
             }
         }
     }
@@ -318,7 +318,9 @@ fn remove_blob_file(
         Err(error) => return Err(CacheManagerError::Io(error)),
     };
     if entry_metadata.file_type().is_symlink() || !entry_metadata.is_file() {
-        return Err(CacheManagerError::UnsafeBlobEntry(expected_path.to_path_buf()));
+        return Err(CacheManagerError::UnsafeBlobEntry(
+            expected_path.to_path_buf(),
+        ));
     }
 
     fs::remove_file(expected_path)?;

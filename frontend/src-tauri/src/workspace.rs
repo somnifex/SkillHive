@@ -1,7 +1,7 @@
 pub mod import;
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -229,6 +229,8 @@ fn remove_tree_without_following_symlinks(path: &Path) -> Result<(), WorkspaceEr
 
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), WorkspaceError> {
+    use std::fs::File;
+
     File::open(path)?.sync_all()?;
     Ok(())
 }
@@ -276,7 +278,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspaces = WorkspaceStore::open(temp.path().join("workspaces")).expect("store");
         let created = workspaces.create("skill-1", "# Demo\n").expect("create");
-        assert_eq!(fs::read(created.path.join("SKILL.md")).expect("read"), b"# Demo\n");
+        assert_eq!(
+            fs::read(created.path.join("SKILL.md")).expect("read"),
+            b"# Demo\n"
+        );
         assert!(workspaces.remove("skill-1").expect("remove"));
         assert!(workspaces.get("skill-1").expect("get").is_none());
     }
@@ -288,7 +293,8 @@ mod tests {
         fs::create_dir_all(&source).expect("source");
         fs::write(source.join("SKILL.md"), b"# Imported\n").expect("skill");
         let blobs = BlobStore::open(temp.path().join("blobs")).expect("blobs");
-        let snapshot = capture_workspace(&blobs, &source, SnapshotPolicy::default()).expect("snapshot");
+        let snapshot =
+            capture_workspace(&blobs, &source, SnapshotPolicy::default()).expect("snapshot");
         let workspaces = WorkspaceStore::open(temp.path().join("workspaces")).expect("store");
 
         let imported = workspaces

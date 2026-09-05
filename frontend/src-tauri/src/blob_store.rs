@@ -86,7 +86,9 @@ impl BlobStore {
                                 return Err(BlobStoreError::CorruptedExistingBlob(hash.clone()));
                             }
                         }
-                        Ok(_) => return Err(BlobStoreError::UnsafeStorageEntry(destination.clone())),
+                        Ok(_) => {
+                            return Err(BlobStoreError::UnsafeStorageEntry(destination.clone()))
+                        }
                         Err(_) => return Err(BlobStoreError::Io(error)),
                     }
                 }
@@ -274,7 +276,10 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(store.verify(&first.hash).expect("verify"));
-        assert_eq!(store.read_bytes(&first.hash).expect("read"), b"hello SkillHive");
+        assert_eq!(
+            store.read_bytes(&first.hash).expect("read"),
+            b"hello SkillHive"
+        );
     }
 
     #[test]

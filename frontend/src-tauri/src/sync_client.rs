@@ -258,6 +258,46 @@ impl SyncClient {
         deserialize_or_classify(response)
     }
 
+    /// POST a JSON envelope and decode the JSON response, classifying
+    /// non-2xx responses per plan §15. Used by the sync transport layer.
+    pub(super) fn post_json<T: serde::de::DeserializeOwned, S: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &S,
+    ) -> Result<T, SyncClientError> {
+        let token = self.ensure_access_token()?;
+        let response = self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .bearer_auth(token)
+            .json(body)
+            .send()
+            .map_err(map_transport)?;
+        deserialize_or_classify(response)
+    }
+
+    /// PUT raw octet-stream bytes with bearer auth (verified blob upload).
+    pub(super) fn put_octet_stream(&self, path: &str, bytes: &[u8]) -> Result<(), SyncClientError> {
+        let token = self.ensure_access_token()?;
+        let response = self
+            .http
+            .put(format!("{}{}", self.base_url, path))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes.to_vec())
+            .send()
+            .map_err(map_transport)?;
+        let status = response.status().as_u16();
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let code = response
+            .json::<ErrorEnvelope>()
+            .ok()
+            .map(|envelope| envelope.error.code);
+        Err(classify_status(status, code))
+    }
+
     fn store_refresh(&self, refresh_token: &str) -> Result<(), SyncClientError> {
         CredentialStore::default().set_secret(ACCOUNT_REFRESH_TOKEN, refresh_token)?;
         Ok(())

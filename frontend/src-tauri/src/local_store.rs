@@ -8,6 +8,7 @@ mod sync_state;
 mod uninstall;
 
 pub use cache::{CacheSkillRecord, LocalCachePolicy};
+pub use outcomes::{MutationOutcome, OutcomeApplied};
 
 use std::{
     fs,

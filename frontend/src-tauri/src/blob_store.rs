@@ -223,6 +223,12 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format_digest(hasher.finalize().as_slice())
 }
 
+/// Public digest helper for sync download verification: hashes bytes with
+/// the same content-addressing scheme the store uses internally.
+pub fn hash_bytes_for_verification(bytes: &[u8]) -> String {
+    hash_bytes(bytes)
+}
+
 fn format_digest(digest: &[u8]) -> String {
     let mut output = String::with_capacity(HASH_PREFIX.len() + SHA256_HEX_LEN);
     output.push_str(HASH_PREFIX);

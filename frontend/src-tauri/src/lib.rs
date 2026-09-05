@@ -8,6 +8,7 @@ pub mod skill_snapshot;
 pub mod snapshot_verifier;
 pub mod sync;
 pub mod sync_client;
+pub mod sync_pull;
 pub mod sync_push;
 pub mod sync_transport;
 pub mod uninstall;

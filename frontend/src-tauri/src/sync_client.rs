@@ -276,6 +276,47 @@ impl SyncClient {
         deserialize_or_classify(response)
     }
 
+    /// GET a JSON envelope with bearer auth and query parameters. Used by
+    /// the change-feed pull client.
+    pub(super) fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(String, String)],
+    ) -> Result<T, SyncClientError> {
+        let token = self.ensure_access_token()?;
+        let response = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .map_err(map_transport)?;
+        deserialize_or_classify(response)
+    }
+
+    /// GET raw octet-stream bytes with bearer auth (verified blob download).
+    pub(super) fn get_octet_stream(&self, path: &str) -> Result<Vec<u8>, SyncClientError> {
+        let token = self.ensure_access_token()?;
+        let response = self
+            .http
+            .get(format!("{}{}", self.base_url, path))
+            .bearer_auth(token)
+            .send()
+            .map_err(map_transport)?;
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let code = response
+                .json::<ErrorEnvelope>()
+                .ok()
+                .map(|envelope| envelope.error.code);
+            return Err(classify_status(status, code));
+        }
+        let bytes = response
+            .bytes()
+            .map_err(|error| SyncClientError::Network(error.to_string()))?;
+        Ok(bytes.to_vec())
+    }
+
     /// PUT raw octet-stream bytes with bearer auth (verified blob upload).
     pub(super) fn put_octet_stream(&self, path: &str, bytes: &[u8]) -> Result<(), SyncClientError> {
         let token = self.ensure_access_token()?;

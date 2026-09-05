@@ -31,6 +31,7 @@ from app.models import Device, Skill, SkillBlobObject, SyncMutationReceipt
 from app.schemas.sync import SyncMutationRequest
 from app.services.blob_storage import BlobStorage
 from app.services.package_manifest import (
+    SKILL_ENTRYPOINT,
     validate_package_closure,
     validate_snapshot_manifest_bytes,
 )
@@ -49,9 +50,7 @@ def validate_active_device(session: Session, user_id: str, device_id: str) -> De
     """Resolve and validate the caller's device; refresh last_seen_at."""
     device = session.get(Device, device_id)
     if device is None or device.user_id != user_id:
-        raise SyncMutationError(
-            "DEVICE_NOT_FOUND", "Device was not found for this account.", 404
-        )
+        raise SyncMutationError("DEVICE_NOT_FOUND", "Device was not found for this account.", 404)
     if device.revoked_at is not None:
         raise SyncMutationError(
             "DEVICE_REVOKED",
@@ -103,11 +102,43 @@ def _verify_package_closure(
     )
 
 
-def _blob_present(
-    session: Session, storage: BlobStorage, hash_value: str, size_bytes: int
-) -> bool:
+def _blob_present(session: Session, storage: BlobStorage, hash_value: str, size_bytes: int) -> bool:
     row = session.get(SkillBlobObject, hash_value)
     return row is not None and storage.exists(hash_value, size_bytes)
+
+
+def _legacy_entrypoint_markdown(session: Session, storage: BlobStorage, manifest_hash: str) -> str:
+    """Synthesize legacy ``skill_markdown`` from the package's SKILL.md entrypoint.
+
+    The current web UI renders ``content.skill_markdown``; a sync-created
+    version therefore populates it from the package entrypoint (plan §17).
+    Missing or unreadable entrypoints degrade to an empty legacy body — the
+    manifest remains the canonical desktop representation. Callers must have
+    verified package closure first, so an absent manifest row is a 500-grade
+    invariant violation rather than a client error.
+    """
+    row = session.get(SkillBlobObject, manifest_hash)
+    if row is None:
+        raise AppError(
+            "BLOB_MISSING",
+            "Package references a blob the server does not hold.",
+            409,
+            {"hash": manifest_hash},
+        )
+    with storage.open(manifest_hash) as stream:
+        manifest_bytes = stream.read()
+    try:
+        files = validate_snapshot_manifest_bytes(manifest_bytes)
+    except AppError:
+        return ""
+    entry = next((item for item in files if item["path"] == SKILL_ENTRYPOINT), None)
+    if entry is None:
+        return ""
+    try:
+        with storage.open(entry["blob_hash"]) as stream:
+            return stream.read().decode("utf-8", errors="replace")
+    except AppError:
+        return ""
 
 
 def _insert_receipt(
@@ -139,14 +170,8 @@ def _insert_receipt(
 
 def _load_skill_locked(session: Session, skill_id: str, user_id: str) -> Skill | None:
     """Load the caller's private Skill with a row lock held until commit."""
-    skill = session.scalar(
-        select(Skill).where(Skill.id == skill_id).with_for_update()
-    )
-    if (
-        skill is None
-        or skill.owner_user_id != user_id
-        or skill.skill_type != "private"
-    ):
+    skill = session.scalar(select(Skill).where(Skill.id == skill_id).with_for_update())
+    if skill is None or skill.owner_user_id != user_id or skill.skill_type != "private":
         return None
     return skill
 
@@ -234,6 +259,9 @@ def _handle_create(
     # raise AppError and leave no receipt so the desktop uploads and retries.
     _verify_package_closure(session, storage, request.package_manifest_hash)
 
+    entrypoint_markdown = _legacy_entrypoint_markdown(
+        session, storage, request.package_manifest_hash
+    )
     mutations = SkillMutationService(session, user_id)
     skill, _version = mutations.create_skill(
         name=request.metadata.name,
@@ -245,7 +273,10 @@ def _handle_create(
         tags=request.metadata.tags,
         skill_status="draft",
         version="0.1.0",
-        content={"schema_version": 1},
+        content={
+            "schema_version": 1,
+            "skill_markdown": entrypoint_markdown,
+        },
         manifest={"name": request.metadata.slug, "schema_version": 1},
         dependency_config={},
         change_log="Created from desktop sync",
@@ -340,6 +371,9 @@ def _handle_update(
     _verify_package_closure(session, storage, request.package_manifest_hash)
 
     metadata = request.metadata
+    entrypoint_markdown = _legacy_entrypoint_markdown(
+        session, storage, request.package_manifest_hash
+    )
     mutations = SkillMutationService(session, user_id)
     created_version = mutations.update_skill(
         skill,
@@ -350,7 +384,10 @@ def _handle_update(
             "tags": metadata.tags,
         },
         audit_action="sync_skill.updated",
-        content={"schema_version": 1},
+        content={
+            "schema_version": 1,
+            "skill_markdown": entrypoint_markdown,
+        },
         manifest={"name": skill.slug, "schema_version": 1},
         dependency_config={},
         change_log="Updated from desktop sync",
@@ -439,9 +476,7 @@ def _handle_delete(
     return _receipt_response(receipt)
 
 
-def _package_size_bytes(
-    session: Session, storage: BlobStorage, manifest_hash: str
-) -> int:
+def _package_size_bytes(session: Session, storage: BlobStorage, manifest_hash: str) -> int:
     row = session.get(SkillBlobObject, manifest_hash)
     del storage
     return int(row.size_bytes) if row is not None else 0

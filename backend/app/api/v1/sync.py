@@ -19,11 +19,13 @@ from app.schemas.sync import (
     MAX_BLOB_BYTES,
     MissingBlobsRequest,
     MissingBlobsResponse,
+    SyncChangesResponse,
     SyncMutationRequest,
     SyncMutationResponse,
 )
 from app.services.blob_registry import missing_blobs, register_verified_blob
 from app.services.blob_storage import get_blob_storage
+from app.services.sync_changes import list_changes
 from app.services.sync_mutations import apply_sync_mutation, validate_active_device
 
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -133,3 +135,21 @@ def submit_mutation(
     )
     session.commit()
     return SyncMutationResponse.model_validate(payload)
+
+
+@router.get("/changes", response_model=SyncChangesResponse)
+def pull_changes(
+    user: CurrentUser,
+    session: DBSession,
+    cursor: str | None = None,
+    limit: int = 100,
+) -> SyncChangesResponse:
+    """Incremental pull over the durable change feed (M2.5).
+
+    Pages are ordered by the append-only change-log sequence; the returned
+    cursor encodes that sequence so a resumed pull never re-reads committed
+    pages. Visibility follows current server authorization: private Skills
+    are owner-only, published global Skills are visible, and delete events
+    are explicit tombstones.
+    """
+    return list_changes(session, user_id=user.id, cursor=cursor, limit=limit)

@@ -32,7 +32,8 @@ use super::{
 
 /// One resolvable conflict: the local Skill record plus the pending
 /// mutation that carries the user's unacknowledged work.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConflictRecord {
     pub skill_id: String,
     pub local_name: String,
@@ -47,7 +48,8 @@ pub struct ConflictRecord {
 }
 
 /// Result of applying a resolution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolutionApplied {
     /// The new mutation queued by keep-local, if any.
     pub new_mutation_id: Option<String>,

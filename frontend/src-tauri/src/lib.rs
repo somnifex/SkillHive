@@ -28,6 +28,8 @@ use local_store::{
 use serde::{Deserialize, Serialize};
 use skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotPolicy};
 use snapshot_verifier::verify_materialized_snapshot;
+use sync::{SyncCycleReport, SyncEngine};
+use sync_client::{DeviceRegistrationRequest, SyncClient};
 use tauri::Manager;
 use uninstall::{UninstallEngine, UninstallRequest};
 use workspace::{WorkspaceRef, WorkspaceStore};
@@ -496,6 +498,128 @@ fn desktop_startup_status(status: tauri::State<'_, DesktopStartupStatus>) -> Des
     status.inner().clone()
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopLoginRequest {
+    pub username: String,
+    pub password: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopLoginResult {
+    pub device_id: String,
+    pub client_instance_id: String,
+    pub expires_in: u64,
+}
+
+#[tauri::command]
+fn desktop_login(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    client: tauri::State<'_, SyncClient>,
+    store: tauri::State<'_, LocalStore>,
+    request: DesktopLoginRequest,
+) -> Result<DesktopLoginResult, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+
+    let registration = DeviceRegistrationRequest {
+        protocol_version: 1,
+        client_instance_id: store
+            .ensure_client_instance_id()
+            .map_err(|error| error.to_string())?,
+        display_name: "SkillHive Desktop".to_owned(),
+        platform: std::env::consts::OS.to_owned(),
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    let session = client
+        .login(&request.username, &request.password, &registration)
+        .map_err(|error| error.to_string())?;
+    store
+        .record_device_registration(
+            &session.device.client_instance_id,
+            &session.device.device_id,
+            // server_user_id is not part of the login payload; the device
+            // registration response is scoped to the authenticated user, so
+            // record the display identity from the device row.
+            &session.device.client_instance_id,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(DesktopLoginResult {
+        device_id: session.device.device_id,
+        client_instance_id: session.device.client_instance_id,
+        expires_in: session.expires_in,
+    })
+}
+
+#[tauri::command]
+fn desktop_logout(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    client: tauri::State<'_, SyncClient>,
+) -> Result<(), String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    client
+        .clear_credentials()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn sync_now(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    client: tauri::State<'_, SyncClient>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+) -> Result<SyncCycleReport, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    SyncEngine
+        .run_cycle(&client, &store, &blobs, "SkillHive Desktop")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn sync_state(store: tauri::State<'_, LocalStore>) -> Result<local_store::LocalSyncState, String> {
+    store.sync_state().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_conflicts(
+    store: tauri::State<'_, LocalStore>,
+) -> Result<Vec<local_store::ConflictRecord>, String> {
+    store.list_conflicts().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn resolve_conflict(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    skill_id: String,
+    mode: String,
+    confirmed: bool,
+) -> Result<local_store::ResolutionApplied, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    match mode.as_str() {
+        "keep_local" => store
+            .resolve_keep_local(&skill_id, confirmed)
+            .map_err(|error| error.to_string()),
+        "keep_remote" => store
+            .resolve_keep_remote(&skill_id, confirmed)
+            .map_err(|error| error.to_string()),
+        other => Err(format!("unknown conflict resolution mode: {other}")),
+    }
+}
+
 fn cache_attempt(
     store: &LocalStore,
     blobs: &BlobStore,
@@ -713,6 +837,11 @@ pub fn run() {
             app.manage(uninstall);
             app.manage(registry);
             app.manage(DesktopMutationCoordinator::default());
+            let sync_client = sync_client::SyncClient::new(
+                &std::env::var("SKILLHIVE_SERVER_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
+            )?;
+            app.manage(sync_client);
             app.manage(DesktopStartupStatus {
                 local_store,
                 recovered_in_flight_mutations,
@@ -737,7 +866,13 @@ pub fn run() {
             uninstall_skill_from_agent,
             enforce_local_cache,
             set_local_cache_policy,
-            desktop_startup_status
+            desktop_startup_status,
+            desktop_login,
+            desktop_logout,
+            sync_now,
+            sync_state,
+            list_conflicts,
+            resolve_conflict
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SkillHive desktop application");

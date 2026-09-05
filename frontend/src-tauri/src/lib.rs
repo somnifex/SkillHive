@@ -7,6 +7,7 @@ pub mod local_store;
 pub mod skill_snapshot;
 pub mod snapshot_verifier;
 pub mod sync;
+pub mod sync_client;
 pub mod uninstall;
 pub mod workspace;
 

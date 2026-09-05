@@ -2,6 +2,7 @@ mod cache;
 mod deployments;
 mod migrations;
 mod mutations;
+mod outcomes;
 mod skills;
 mod sync_state;
 mod uninstall;

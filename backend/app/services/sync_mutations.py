@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
 from app.db.base import utc_now
-from app.models import Device, Skill, SkillBlobObject, SyncChangeLog, SyncMutationReceipt
+from app.models import Device, Skill, SkillBlobObject, SyncMutationReceipt
 from app.schemas.sync import SyncMutationRequest
 from app.services.blob_storage import BlobStorage
 from app.services.package_manifest import (
@@ -108,22 +108,6 @@ def _blob_present(
 ) -> bool:
     row = session.get(SkillBlobObject, hash_value)
     return row is not None and storage.exists(hash_value, size_bytes)
-
-
-def _insert_change_event(
-    session: Session, *, skill: Skill, operation: str, metadata: dict[str, Any]
-) -> None:
-    session.add(
-        SyncChangeLog(
-            resource_type="skill",
-            resource_id=skill.id,
-            resource_revision=skill.sync_revision,
-            operation=operation,
-            owner_user_id=skill.owner_user_id,
-            package_manifest_hash=skill.current_package_hash,
-            metadata_payload=metadata,
-        )
-    )
 
 
 def _insert_receipt(
@@ -269,7 +253,6 @@ def _handle_create(
         audit_action="sync_skill.created",
         package_manifest_hash=request.package_manifest_hash,
     )
-    _insert_change_event(session, skill=skill, operation="upsert", metadata=_skill_metadata(skill))
     receipt = _insert_receipt(
         session,
         user_id=user_id,
@@ -377,7 +360,6 @@ def _handle_update(
     )
     if created_version is None:
         raise AppError("SYNC_MUTATION_FAILED", "Skill update produced no version.", 500)
-    _insert_change_event(session, skill=skill, operation="upsert", metadata=_skill_metadata(skill))
     receipt = _insert_receipt(
         session,
         user_id=user_id,
@@ -444,7 +426,6 @@ def _handle_delete(
 
     mutations = SkillMutationService(session, user_id)
     mutations.soft_delete(skill, audit_action="sync_skill.deleted")
-    _insert_change_event(session, skill=skill, operation="delete", metadata=_skill_metadata(skill))
     receipt = _insert_receipt(
         session,
         user_id=user_id,

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
 from app.db.base import utc_now
-from app.models import Skill, SkillVersion
+from app.models import Skill, SkillVersion, SyncChangeLog
 from app.services.audit import write_audit
 
 
@@ -22,11 +22,43 @@ class SkillMutationService:
 
     Authorization is also deliberately outside this class. A caller must resolve
     an already-authorized Skill before passing it to update/delete/version methods.
+
+    Every domain mutation that changes the desktop-visible representation also
+    appends one :class:`SyncChangeLog` row in the same transaction, so
+    browser-originated and sync-originated changes surface identically in the
+    M2.5 pull feed (plan §11 “Existing REST changes”).
     """
 
     def __init__(self, session: Session, actor_user_id: str) -> None:
         self.session = session
         self.actor_user_id = actor_user_id
+
+    def _emit_change_event(
+        self,
+        skill: Skill,
+        *,
+        operation: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        payload = metadata if metadata is not None else {
+            "name": skill.name,
+            "slug": skill.slug,
+            "description": skill.description,
+            "category": skill.category,
+            "tags": list(skill.tags or []),
+            "status": skill.status,
+        }
+        self.session.add(
+            SyncChangeLog(
+                resource_type="skill",
+                resource_id=skill.id,
+                resource_revision=skill.sync_revision,
+                operation=operation,
+                owner_user_id=skill.owner_user_id,
+                package_manifest_hash=skill.current_package_hash,
+                metadata_payload=payload,
+            )
+        )
 
     def create_skill(
         self,
@@ -95,8 +127,8 @@ class SkillMutationService:
             resource_id=skill.id,
             after_data=after_data,
         )
+        self._emit_change_event(skill, operation="upsert")
         return skill, created_version
-
     def update_skill(
         self,
         skill: Skill,
@@ -168,6 +200,8 @@ class SkillMutationService:
                 "revision": skill.sync_revision,
             },
         )
+        if changed:
+            self._emit_change_event(skill, operation="upsert")
         return created_version
 
     def create_version(
@@ -221,6 +255,7 @@ class SkillMutationService:
                 "revision": skill.sync_revision,
             },
         )
+        self._emit_change_event(skill, operation="upsert")
         return created_version
 
     def publish_version(
@@ -254,6 +289,8 @@ class SkillMutationService:
             resource_id=skill.id,
             after_data={"version": version.version, "revision": skill.sync_revision},
         )
+        if changed:
+            self._emit_change_event(skill, operation="upsert")
 
     def set_status(self, skill: Skill, status: str, *, audit_action: str) -> None:
         before_status = skill.status
@@ -269,6 +306,8 @@ class SkillMutationService:
             before_data={"status": before_status},
             after_data={"status": status, "revision": skill.sync_revision},
         )
+        if before_status != status:
+            self._emit_change_event(skill, operation="upsert")
 
     def soft_delete(self, skill: Skill, *, audit_action: str) -> None:
         before = {
@@ -276,7 +315,8 @@ class SkillMutationService:
             "status": skill.status,
             "revision": skill.sync_revision,
         }
-        if skill.status != "deleted" or skill.deleted_at is None:
+        deleted = skill.status != "deleted" or skill.deleted_at is None
+        if deleted:
             skill.status = "deleted"
             skill.deleted_at = utc_now()
             skill.sync_revision += 1
@@ -289,6 +329,8 @@ class SkillMutationService:
             before_data=before,
             after_data={"status": "deleted", "revision": skill.sync_revision},
         )
+        if deleted:
+            self._emit_change_event(skill, operation="delete")
 
     def ensure_version_available(self, skill_id: str, version: str) -> None:
         exists = self.session.scalar(

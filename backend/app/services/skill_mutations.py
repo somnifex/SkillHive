@@ -40,14 +40,18 @@ class SkillMutationService:
         operation: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        payload = metadata if metadata is not None else {
-            "name": skill.name,
-            "slug": skill.slug,
-            "description": skill.description,
-            "category": skill.category,
-            "tags": list(skill.tags or []),
-            "status": skill.status,
-        }
+        payload = (
+            metadata
+            if metadata is not None
+            else {
+                "name": skill.name,
+                "slug": skill.slug,
+                "description": skill.description,
+                "category": skill.category,
+                "tags": list(skill.tags or []),
+                "status": skill.status,
+            }
+        )
         self.session.add(
             SyncChangeLog(
                 resource_type="skill",
@@ -129,6 +133,7 @@ class SkillMutationService:
         )
         self._emit_change_event(skill, operation="upsert")
         return skill, created_version
+
     def update_skill(
         self,
         skill: Skill,

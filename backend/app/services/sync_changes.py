@@ -100,9 +100,7 @@ def _project(session: Session, row: SyncChangeLog, user_id: str) -> SyncChangeIt
     )
 
 
-def _skill_visible(
-    session: Session, skill: Skill | None, row: SyncChangeLog, user_id: str
-) -> bool:
+def _skill_visible(session: Session, skill: Skill | None, row: SyncChangeLog, user_id: str) -> bool:
     if row.operation == _OPERATION_DELETE:
         # Tombstones are deterministic: the owner always sees their private
         # Skill's deletion; grant-holding group members keep seeing global

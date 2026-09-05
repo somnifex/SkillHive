@@ -270,7 +270,11 @@ def _backfill_change_feed_baseline() -> None:
         sa.column("owner_user_id", sa.String(length=36)),
         sa.column("package_manifest_hash", sa.String(length=_SHA256_LENGTH)),
         sa.column("metadata_payload", sa.JSON()),
-        sa.column("created_at", sa.DateTime(timezone=True)),
+        # The SELECT above yields dialect-native values (str on SQLite,
+        # datetime on PostgreSQL servers). Binding them back through a typed
+        # DateTime column rejects raw strings on SQLite, so use a typeless
+        # column and let each dialect store the already-persisted value.
+        sa.column("created_at"),
     )
     for row in rows:
         connection.execute(

@@ -56,6 +56,7 @@ frontend/.eslintcache
 # Rust / Tauri build output
 /target/
 frontend/src-tauri/target/
+frontend/src-tauri/gen/
 *.pdb
 *.dSYM/
 

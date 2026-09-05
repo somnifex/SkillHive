@@ -111,6 +111,23 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Marks one successful push cycle for diagnostics. Used by the sync
+    /// orchestrator after its dispatch step made progress.
+    pub fn record_push_success(&self) -> Result<(), LocalStoreError> {
+        let connection = self.lock_connection()?;
+        connection.execute(
+            r#"
+            UPDATE local_sync_state
+            SET last_successful_push_at = CURRENT_TIMESTAMP,
+                last_server_error = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+            "#,
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Returns the stable installation identity, creating it exactly once if
     /// absent. The UUID is committed inside the same immediate transaction
     /// that first observes the missing identity, so two racing callers
@@ -230,6 +247,17 @@ mod tests {
 
         let state = store.sync_state().expect("state");
         assert_eq!(state.server_cursor.as_deref(), Some("v1.AAAAAQ"));
+        assert_eq!(state.last_server_error, None);
+    }
+
+    #[test]
+    fn record_push_success_stamps_timestamp_and_clears_error() {
+        let (_temp, store) = open_temp_store();
+        store.record_sync_error("stale error").expect("error");
+        store.record_push_success().expect("push success");
+
+        let state = store.sync_state().expect("state");
+        assert!(state.last_successful_push_at.is_some());
         assert_eq!(state.last_server_error, None);
     }
 

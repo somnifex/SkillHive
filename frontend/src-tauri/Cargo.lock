@@ -2924,6 +2924,7 @@ name = "skillhive-desktop"
 version = "0.1.0"
 dependencies = [
  "keyring",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

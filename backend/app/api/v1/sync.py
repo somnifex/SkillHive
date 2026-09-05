@@ -1,8 +1,8 @@
-"""M2.2 blob transport endpoints.
+"""M2.2/M2.4 sync transport endpoints.
 
-Missing-object negotiation and verified bounded upload. Endpoints are
-authenticated with the standard bearer-token dependency; device-scoped
-authorization is tightened in M2.3 when device identity lands.
+Missing-object negotiation, verified bounded upload, and the idempotent
+mutation push endpoint. Endpoints are authenticated with the standard
+bearer-token dependency.
 """
 
 import hashlib
@@ -19,9 +19,12 @@ from app.schemas.sync import (
     MAX_BLOB_BYTES,
     MissingBlobsRequest,
     MissingBlobsResponse,
+    SyncMutationRequest,
+    SyncMutationResponse,
 )
 from app.services.blob_registry import missing_blobs, register_verified_blob
 from app.services.blob_storage import get_blob_storage
+from app.services.sync_mutations import apply_sync_mutation, validate_active_device
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 
@@ -104,3 +107,29 @@ def download_blob(
     storage = get_blob_storage()
     stream = storage.open(hash_value)
     return StreamingResponse(stream, media_type="application/octet-stream")
+
+
+@router.post("/mutations", response_model=SyncMutationResponse)
+def submit_mutation(
+    request: SyncMutationRequest,
+    user: CurrentUser,
+    session: DBSession,
+) -> SyncMutationResponse:
+    """Apply one idempotent desktop mutation (M2.4).
+
+    The whole apply — receipt lookup, domain mutation, change event, audit,
+    receipt — is one transaction; a committed receipt is replayed verbatim on
+    retry. Definitive logical outcomes (conflict/permission/validation) are
+    returned as protocol responses with HTTP 200; only transport-grade
+    conditions (missing blobs, revoked device) surface as HTTP errors.
+    """
+    device = validate_active_device(session, user.id, str(request.device_id))
+    payload = apply_sync_mutation(
+        session,
+        user_id=user.id,
+        device=device,
+        request=request,
+        storage=get_blob_storage(),
+    )
+    session.commit()
+    return SyncMutationResponse.model_validate(payload)

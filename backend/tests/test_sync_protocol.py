@@ -1,10 +1,9 @@
 from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
-
 from app.schemas.sync import MissingBlobsRequest, SyncMutationRequest, SyncMutationResponse
 from app.services.sync_cursor import SyncCursorError, decode_sync_cursor, encode_sync_cursor
+from pydantic import ValidationError
 
 _DEVICE_ID = "11111111-1111-4111-8111-111111111111"
 _MUTATION_ID = "22222222-2222-4222-8222-222222222222"

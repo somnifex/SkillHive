@@ -5,7 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
-SYNC_PROTOCOL_VERSION = 1
+SYNC_PROTOCOL_VERSION: Literal[1] = 1
 MAX_BLOB_NEGOTIATION_ITEMS = 1024
 MAX_BLOB_BYTES = 64 * 1024 * 1024
 MAX_PACKAGE_BYTES = 512 * 1024 * 1024

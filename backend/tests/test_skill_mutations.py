@@ -1,8 +1,7 @@
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
-
 from app.models import AuditLog, Skill, SkillVersion, User
 from app.services.skill_mutations import SkillMutationService
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 
 def _user(session: Session) -> User:
@@ -49,6 +48,9 @@ def test_domain_mutation_does_not_commit_caller_transaction(db_session: Session)
     assert version.revision == 1
     assert db_session.get(Skill, skill.id) is skill
     assert db_session.get(SkillVersion, version.id) is version
+    # autoflush=False sessions do not flush on scalar(); flush explicitly so
+    # the pending audit row is visible to the count query without committing.
+    db_session.flush()
     assert db_session.scalar(select(func.count()).select_from(AuditLog)) == 1
 
     # The domain layer must not have committed. A future sync handler needs to

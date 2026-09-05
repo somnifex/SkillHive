@@ -1,4 +1,5 @@
 mod cache;
+mod conflicts;
 mod deployments;
 mod migrations;
 mod mutations;
@@ -9,6 +10,7 @@ mod sync_state;
 mod uninstall;
 
 pub use cache::{CacheSkillRecord, LocalCachePolicy};
+pub use conflicts::{ConflictRecord, ResolutionApplied};
 pub use outcomes::{MutationOutcome, OutcomeApplied};
 pub use pull_apply::{ChangeItem, ChangesPage, PageApplied};
 

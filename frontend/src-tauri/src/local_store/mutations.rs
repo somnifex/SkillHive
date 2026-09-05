@@ -230,7 +230,7 @@ impl LocalStore {
     }
 }
 
-fn next_local_sequence(
+pub(super) fn next_local_sequence(
     connection: &rusqlite::Connection,
     skill_id: &str,
 ) -> Result<i64, LocalStoreError> {

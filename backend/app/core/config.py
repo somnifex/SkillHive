@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
     database_url: str = "sqlite:///./data/skillhive.db"
+    blob_storage_path: str = "./data/blobs"
     jwt_secret_key: str = Field(
         default="development-only-change-me-at-least-32-bytes",
         min_length=16,

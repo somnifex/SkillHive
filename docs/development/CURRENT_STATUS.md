@@ -1,6 +1,6 @@
 # SkillHive Current Development Status
 
-Updated: 2026-09-05
+Updated: 2026-09-06
 
 This file contains the **current dynamic repository state** and supersedes branch/PR metadata captured at the top of `LOCAL_AGENT_HANDOFF.md`.
 
@@ -36,25 +36,35 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 | M2 Cloud sync epic (#4) | IN PROGRESS |
 | M2.0 Shared Skill mutation path (#5) | CODE COMPLETE — backend validated locally (see validation truth) |
 | M2.1 Protocol/schema foundation (#6) | IN PROGRESS — SQLite-validated; PostgreSQL/MySQL bypassed by owner instruction |
-| M2.2 Package/blob storage (#7) | PLANNED (NEXT) |
-| M2.3 Device identity/secure credentials (#8) | PLANNED |
-| M2.4 Idempotent push (#9) | PLANNED |
-| M2.5 Durable pull/change feed (#10) | PLANNED |
-| M2.6 Desktop sync orchestrator (#11) | PLANNED |
+| M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc outstanding |
+| M2.3 Device identity/secure credentials (#8) | CODE COMPLETE — server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
+| M2.4 Idempotent push (#9) | SERVER COMPLETE — push endpoint + receipt replay validated on SQLite; desktop ACK transaction outstanding |
+| M2.5 Durable pull/change feed (#10) | SERVER COMPLETE — change feed emission + pull endpoint validated on SQLite; desktop pull apply outstanding |
+| M2.6 Desktop sync orchestrator (#11) | PLANNED (NEXT) |
 | M2.7 Conflicts/reliability checkpoint (#12) | PLANNED |
 | M3 Enterprise offline authorization | PLANNED |
 | M4 Production hardening | PLANNED |
 
 ## Exact next task
 
-Start **M2.2 / Issue #7 (Package storage and transport)**:
-storage backend abstraction, local dev storage backend, S3-compatible
-production backend contract, missing-hash negotiation, verified streaming
-upload/download, and server manifest validation identical in constraints to
-desktop snapshot validation (see `docs/architecture/m2-cloud-sync-plan.md`).
+Continue the desktop side of the sync milestones on branch `feat/m2-continue`
+(backend push/pull endpoints and the desktop M2.3 boundary are landed):
 
-The baseline-truth work that preceded M2.2 is now done locally (2026-09-05);
-its results and the explicit bypasses are recorded under **Validation truth**.
+1. **M2.4 desktop (Issue #9)** — SQLite ACK transaction (mutation ACK, remote
+   ID mapping, remote revision, state transition only when no later mutation
+   exists), blob upload negotiation from the desktop, stable mutation ID
+   retry over `sync_client`.
+2. **M2.5 desktop (Issue #10)** — transactional pull-page apply, package
+   download/hydration, `remote_only` state, cursor commits only after
+   durable apply.
+3. **M2.6 (Issue #11)** — sync orchestrator composing the cycle with
+   persisted backoff; `sync.rs` is still a stub.
+4. **M2.7 (Issue #12)** — conflict persistence, resolution ops, error
+   classifier, local reliability validation scenarios.
+
+Outstanding leftovers: M2.2 mark-and-sweep GC design doc (Issue #7);
+PostgreSQL/MySQL migration re-validation when a server becomes available
+(owner bypassed SQL-server flows, 2026-09-04).
 
 ## M2.1 already implemented but unverified
 

@@ -56,7 +56,7 @@ No GitHub Actions workflow is enabled for this development phase.
 | M2 Cloud sync epic | IN PROGRESS | #4 | Detailed design and issue breakdown exist |
 | M2.0 Shared server mutation path | CODE COMPLETE / PENDING LOCAL VALIDATION | #5 | Implemented and statically reviewed; tests not run |
 | M2.1 Protocol/schema foundation | IN PROGRESS | #6 | Major schema/protocol pieces implemented; must be locally validated and finished |
-| M2.2 Package/blob storage | PLANNED | #7 | Not started |
+| M2.2 Package/blob storage | CODE COMPLETE | #7 | Storage/transport implemented and locally validated; GC design doc landed (`docs/development/GC_DESIGN.md`), destructive sweep deferred by design |
 | M2.3 Device identity/credentials | PLANNED | #8 | Not started beyond schema placeholders/stubs |
 | M2.4 Idempotent push | PLANNED | #9 | Not started |
 | M2.5 Durable pull/change feed | PLANNED | #10 | Schema baseline exists; online implementation not started |

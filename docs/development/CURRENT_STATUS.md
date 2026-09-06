@@ -36,7 +36,7 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 | M2 Cloud sync epic (#4) | IN PROGRESS |
 | M2.0 Shared Skill mutation path (#5) | CODE COMPLETE — backend validated locally (see validation truth) |
 | M2.1 Protocol/schema foundation (#6) | IN PROGRESS — SQLite-validated; PostgreSQL/MySQL bypassed by owner instruction |
-| M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc outstanding |
+| M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc landed (`docs/development/GC_DESIGN.md`, destructive sweep deliberately deferred) |
 | M2.3 Device identity/secure credentials (#8) | CODE COMPLETE — server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
 | M2.4 Idempotent push (#9) | CODE COMPLETE (desktop) — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed |
 | M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration deferred until a consumer needs it |
@@ -51,19 +51,22 @@ Continue on branch `feat/m2-continue`. All M2 desktop code work packages
 (M2.2–M2.7 core) are code complete; what remains before M2 can be called
 VERIFIED:
 
-1. **Background triggers (M2.6 remainder)** — app-startup sync, network-
-   recovery trigger, and a bounded periodic wake; `sync_now` (explicit
-   user request) already works.
+1. **Background triggers (M2.6 remainder)** — DONE: startup cycle, bounded
+   periodic wake, pull-backlog self-poke, and commit-triggered sync landed
+   (`sync_worker.rs`, commits d859593/1a00341).
 2. **Client-process fault-injection scenarios (Issue #12 remainder)** —
    kill after HTTP ACK before SQLite ACK, pull interruption between
    pages, restart with pending outbox/cursor: these need the actual Tauri
    process driven against the live server. Server-side behavior for every
    scenario was validated live on 2026-09-06.
-3. **M2.2 leftover (Issue #7)** — mark-and-sweep GC design doc.
+3. **M2.2 leftover (Issue #7)** — DONE: mark-and-sweep GC design doc landed
+   as `docs/development/GC_DESIGN.md` (roots, sweep contract, cursor
+   retention, deferred destructive work package).
 
-Outstanding leftovers: M2.2 mark-and-sweep GC design doc (Issue #7);
-PostgreSQL/MySQL migration re-validation when a server becomes available
-(owner bypassed SQL-server flows, 2026-09-04).
+Outstanding leftovers: client-process fault-injection scenarios (Issue #12
+remainder, needs a driven Tauri process); PostgreSQL/MySQL migration
+re-validation when a server becomes available (owner bypassed SQL-server
+flows, 2026-09-04).
 
 ## M2.1 already implemented but unverified
 

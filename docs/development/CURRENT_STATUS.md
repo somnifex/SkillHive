@@ -100,11 +100,15 @@ Scenario results (all through the real client process):
 - REST delete → pulled tombstone removed the local row — OK;
 - multi-file skill create → package closure upload: manifest + file blobs stored server-side, `current_package_hash` matches — OK;
 - **blob-download pull path**: local manifest blob deleted + cursor rewound → full re-pull reapplied the 7-event feed (6 upserts + 1 tombstone) and re-downloaded the manifest, digest-verified before storage — OK;
-- 422 `VALIDATION_ERROR` on a malformed update → mutation `permanent_error`, no retry storm — OK.
+- 422 `VALIDATION_ERROR` on a malformed update → mutation `permanent_error`, no retry storm — OK;
+- **server offline at session refresh** → cycle stops with a transport error, mutation stays `pending` with `retry_count 0` (no state corruption, no backoff miscalibration); server back up → next cycle pushes and converges — OK (validated twice);
+- **server-side device revocation** → `sync_now` stops with `DEVICE_REVOKED` (403), pending mutation state untouched, no server error recorded; un-revoke → next cycle pushes normally — OK;
+- **wrong-password login** → typed `authentication failed (401)`, no credential written — OK; `desktop_logout` → `sync_now` stops quietly with `not signed in` — OK;
+- **hard kill again on the final build**: commit → immediate `Stop-Process` (worker may not have run yet, mutation still `pending`) → relaunch → **startup cycle alone converged** mutation → `acked` rev 1 and server package stored, no manual `sync_now` — OK.
 
 Notes: pull downloads only the package **manifest** per feed row (closure file blobs hydrate lazily by design); an empty feed page still counts as one applied page (`pagesApplied: 1` with zero upserts is the converged-cursor shape, not a failure).
 
-Not covered live: `permission_denied` outcome (needs a second-user grant-revoke scenario), transport-failure backoff timing in the real process, workspace hydration of pulled content.
+Not covered live: per-mutation mid-dispatch transport backoff (`retryable_error` + `next_attempt_at` timing — unit-tested in `outcomes.rs`, but the kill/race between session refresh and closure upload was not reproducibly injectable in the live process); `permission_denied` outcome (needs a second-user grant-revoke scenario); workspace hydration of pulled content.
 
 ### Validated 2026-09-06 (live end-to-end sync protocol run, Windows 11 Pro 10.0.26200)
 

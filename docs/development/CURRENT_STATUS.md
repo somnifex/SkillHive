@@ -64,11 +64,10 @@ gaps recorded there). Remaining before M2 is fully closed:
    available (owner bypassed SQL-server flows, 2026-09-04).
 
 Legacy package synthesis (plan §17 / handoff §9.6) is **landed** (commit
-`b0914e5`): browser-created Skills now carry a synthesized SKILL.md
-package on the pull feed, and pre-existing package-less rows are
-synthesized lazily on first pull — covered by dedicated backend tests
-(`test_sync_changes_api.py`), not yet re-validated live through the
-desktop CDP harness.
+`b0914e5`) and **live-validated through the desktop CDP harness**
+(2026-09-06, see validation truth): browser-created Skills carry a
+synthesized SKILL.md package on the pull feed, and the desktop applies
+it as a digest-verified manifest blob on a `remote_only` row.
 
 ## M2.1 already implemented but unverified
 
@@ -122,6 +121,17 @@ Scenario results (all through the real client process):
 - **offline outbox chain (M2 exit criterion 3)**: server stopped → create + two updates committed offline (chain of 3) → server restored → cycles dispatched create→update→update in per-Skill order, each acking exactly once (rev 1→2→3). Found and fixed `02cdd8e`: the Skill's own change-feed echo pulled mid-chain while updates were pending labeled the Skill `conflict`, and no later transition cleared it, wedging the row after the chain fully acked — `apply_acked` now clears a stale `conflict` label when no unacked mutation remains (a genuine conflict always keeps a conflicted mutation row, which holds the gate). Re-validated on a fresh offline chain: converges to `synced` at the server head — OK.
 
 Notes: pull downloads only the package **manifest** per feed row (closure file blobs hydrate lazily by design); an empty feed page still counts as one applied page (`pagesApplied: 1` with zero upserts is the converged-cursor shape, not a failure).
+
+### Validated 2026-09-06 (live desktop, plan §17 legacy package synthesis — commit `b0914e5`)
+
+Same CDP harness as above; fresh server DB (Alembic → `b6a31d0f4c9e`, `tmp/e2e-server/`), fresh desktop login as a new user (device `4a545614…`):
+
+- browser REST create with `instructions` only → server synthesized the SKILL.md package **synchronously at create time**: change feed row carries `packageManifestHash` (`sha256:967caac2…`) — OK;
+- manifest downloaded via `/sync/blobs/{hash}` → `{"format_version":1,"files":[{"path":"SKILL.md",…}]}`, entrypoint SKILL.md carries YAML front-matter (`name`/`description`) + the legacy body — OK;
+- desktop `desktop_login` → `sync_now` → pulled the upsert; `local_skills` gained a `remote_only` row for the browser skill with `current_blob_hash` = the feed's manifest hash; the manifest bytes landed digest-verified in the desktop blob store (`%LOCALAPPDATA%/app.skillhive.desktop/blobs/sha256/96/967caac2…`) and parse to the exact same JSON — OK;
+- cursor rewind (`server_cursor=0`) + second cycle → converged shape (empty page, `pagesApplied: 1`, `blobsDownloaded: 0` on the repeat; the manifest was already content-addressed locally) — OK.
+
+Backend pytest covers the deterministic/lazy-synthesis/empty-body cases (`test_sync_changes_api.py`, 88 passed); this run closes the desktop side.
 
 Not covered live: per-mutation mid-dispatch transport backoff (`retryable_error` + `next_attempt_at` timing — unit-tested in `outcomes.rs`, but the kill/race between session refresh and closure upload was not reproducibly injectable in the live process); `permission_denied` outcome (needs a second-user grant-revoke scenario); workspace hydration of pulled content.
 

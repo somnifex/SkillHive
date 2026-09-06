@@ -62,7 +62,7 @@ No GitHub Actions workflow is enabled for this development phase.
 | M2.5 Durable pull/change feed | CODE COMPLETE (desktop) | #10 | Page apply + cursor commit + HTTP pull client + verified blob download landed |
 | M2.6 Desktop sync orchestrator | CODE COMPLETE (core) | #11 | `SyncEngine::run_cycle` + background triggers landed; WebView commands wired |
 | M2.7 Conflict/reliability checkpoint | CODE COMPLETE (core) | #12 | Conflict query/resolution + 4xx classifier landed; server-side and live client-process scenarios validated 2026-09-06 |
-| M3 Enterprise offline authorization | PLANNED | roadmap | Permission leases/revocation policy |
+| M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED | roadmap | Signed entitlement leases shipped in pull metadata; desktop schema-v4 store + pull-apply/startup/post-pull reconciliation; live CDP validation 2026-09-07 (see CURRENT_STATUS.md) |
 | M4 Production hardening | PLANNED | roadmap | Observability, updates, fault testing, release SLO |
 
 `CODE COMPLETE` must not be relabeled `VERIFIED` until the local validation checklist has actually been run.

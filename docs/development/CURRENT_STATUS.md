@@ -1,6 +1,6 @@
 # SkillHive Current Development Status
 
-Updated: 2026-09-06
+Updated: 2026-09-07
 
 This file contains the **current dynamic repository state** and supersedes branch/PR metadata captured at the top of `LOCAL_AGENT_HANDOFF.md`.
 
@@ -42,15 +42,20 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 | M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration deferred until a consumer needs it |
 | M2.6 Desktop sync orchestrator (#11) | CODE COMPLETE (desktop) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake landed (`sync_worker.rs`) and validated live |
 | M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (desktop) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side AND live client-process scenarios validated 2026-09-06 (see validation truth)** |
-| M3 Enterprise offline authorization | PLANNED |
+| M3 Enterprise offline authorization | CODE COMPLETE (server + desktop) — grant offline policy (migration `c4d5e6f7a8b9`), signed JWT entitlement leases shipped in pull metadata, desktop schema-v4 entitlement store, pull-apply + startup + post-pull reconciliation landed (`b2165a7`, `b5be325`, `97fe35e`, `bef5977`); **unit-level validated only — live CDP run still pending** |
 | M4 Production hardening | PLANNED |
 
 ## Exact next task
 
-Continue on branch `feat/m2-continue`. All M2 desktop code work packages
-(M2.2–M2.7) are code complete; the client-process reliability suite and the
-M2 exit criteria have been exercised live (see validation truth; remaining
-gaps recorded there). Remaining before M2 is fully closed:
+Continue on branch `feat/m2-continue`. M2 desktop work packages remain code
+complete (see gaps below). M3 is now code complete on both sides; the next
+M3 task is **live validation through the CDP harness**: admin grants a
+managed global skill to a group (with each offline policy), the member
+desktop pulls the lease, then revoke/expiry scenarios reconcile
+(`access_revoked` + deployment `revoked`). After that, M4 (production
+hardening) is the next milestone.
+
+Remaining M2 gaps (record-only):
 
 1. **Workspaces/hydration polish (M2.5 leftover)** — pulled `remote_only`
    records carry metadata + manifest only; workspace hydration (materialize
@@ -62,6 +67,49 @@ gaps recorded there). Remaining before M2 is fully closed:
    commit/deploy) are exposed but not yet consumed by React pages.
 4. **PostgreSQL/MySQL migration re-validation** when a server becomes
    available (owner bypassed SQL-server flows, 2026-09-04).
+
+## M3 state (2026-09-07)
+
+Server side (commit `b2165a7` + `b5be325`):
+
+- `group_skill_grants` carries `offline_policy` (`unlimited`/`ttl`/
+  `disabled`) + `offline_ttl_hours` with DB-level CHECK constraints
+  (migration `c4d5e6f7a8b9`; legacy grants backfill `unlimited`).
+- Grant create/update APIs accept and persist the policy with pairing
+  validation; admin grant-revoke flow unchanged.
+- `app/services/entitlements.py` signs leases with the existing JWT secret
+  under a dedicated `type: "skill_lease"` claim (access tokens can never be
+  replayed as leases and vice versa). `unlimited` gets a 7-day refresh
+  bound instead of infinite expiry; `disabled` leases are dead on arrival
+  (exp == issued); `ttl` uses the grant's hours. `policy_version` derives
+  from the grant's `updated_at`.
+- The pull projection (`sync_changes.py`) attaches `metadata.entitlement`
+  (lease token, permission level, policy, ttl, signed `issued_at`/
+  `expires_at`) for grant-entitled managed skills.
+
+Desktop side (commits `97fe35e` + `bef5977`):
+
+- Schema v4 adds `local_entitlements` (lease stored verbatim) with
+  expiry indexing.
+- `apply_changes_page` extracts `metadata.entitlement` inside the same
+  page transaction: fresh lease keeps the skill usable; expired-at-apply
+  flips it `access_revoked`; fresh lease re-entitles an expired-lease
+  revocation; a malformed lease fails the whole page (cursor never
+  advances past an uninterpretable lease — fail closed).
+- `expire_due_entitlements` runs at startup (before cache/agent
+  reconciliation) and after each sync pull; it also marks active
+  deployments `revoked`. Reconciled skill IDs surface in
+  `DesktopStartupStatus.expiredEntitlements`.
+- Trust model (handoff §15.3): the desktop enforces the expiry contract as
+  a policy clock from the authenticated transport; it does not verify the
+  lease signature locally and makes no DRM claims.
+
+Validation truth: backend `uv run python -m pytest backend/tests` →
+106 passed (includes 8 entitlement-lease tests); `uv run mypy backend/app`
+strict → clean; `cargo test --lib` → 91 passed (6 entitlement + 3
+pull-apply entitlement tests); `cargo clippy -D warnings` and
+`cargo fmt --check` → clean. **Not yet live-validated**: the revoke/expiry
+scenarios through the desktop CDP harness (see "Exact next task").
 
 Legacy package synthesis (plan §17 / handoff §9.6) is **landed** (commit
 `b0914e5`) and **live-validated through the desktop CDP harness**

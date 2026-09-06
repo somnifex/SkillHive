@@ -329,6 +329,52 @@ def test_malformed_cursor_rejected(pull_client: TestClient) -> None:
     assert response.json()["error"]["code"] == "SYNC_CURSOR_INVALID"
 
 
+def test_cursor_before_retention_window_rejected_with_410(
+    pull_client: TestClient, pull_session: Session
+) -> None:
+    """A cursor below the oldest surviving change row fails loudly (GC §6)."""
+    headers = _bearer(pull_client, "expired_cursor")
+    created = pull_client.post(
+        "/api/v1/skills",
+        headers=headers,
+        json={"name": "Expiry Skill", "slug": "expiry-skill", "content": {}},
+    )
+    assert created.status_code == 201
+
+    # Simulate trimming: pretend the log's oldest surviving row is sequence 2
+    # while the client's cursor still points below it.
+    from app.models import SyncChangeLog
+    from sqlalchemy import select, update
+
+    row = pull_session.scalar(select(SyncChangeLog).order_by(SyncChangeLog.sequence.asc()))
+    assert row is not None
+    # Decode "v1.AAAAAAAAAAE" = sequence 1; rewrite the only row to sequence 2
+    # so a cursor at 1 predates retained history.
+    pull_session.execute(
+        update(SyncChangeLog).where(SyncChangeLog.sequence == row.sequence).values(sequence=2)
+    )
+    pull_session.commit()
+
+    expired = pull_client.get(
+        "/api/v1/sync/changes",
+        headers=headers,
+        params={"cursor": first_cursor_value()},
+    )
+    assert expired.status_code == 410
+    assert expired.json()["error"]["code"] == "SYNC_CURSOR_EXPIRED"
+
+    # A zero cursor (full baseline) stays servable.
+    baseline = pull_client.get("/api/v1/sync/changes", headers=headers)
+    assert baseline.status_code == 200
+    assert any(item["resourceId"] == created.json()["id"] for item in baseline.json()["changes"])
+
+
+def first_cursor_value() -> str:
+    from app.services.sync_cursor import encode_sync_cursor
+
+    return encode_sync_cursor(1)
+
+
 def test_skill_model_revision_visible_in_read_model(
     pull_client: TestClient, pull_session: Session
 ) -> None:

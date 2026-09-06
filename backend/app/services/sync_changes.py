@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
@@ -51,6 +51,19 @@ def list_changes(
         raise AppError("SYNC_CURSOR_INVALID", "Malformed sync cursor.", 400) from error
     bounded_limit = min(max(1, limit), MAX_PULL_LIMIT)
 
+    # Cursor-expiry contract (GC design §6): a cursor pointing before the
+    # oldest retained change row must fail loudly, never serve a silently
+    # truncated page. Sequence 0 (no cursor) means full baseline and is
+    # always servable — the baseline is rebuilt from live state, not history.
+    if sequence > 0:
+        oldest = _oldest_retained_sequence(session)
+        if oldest is not None and sequence < oldest:
+            raise AppError(
+                "SYNC_CURSOR_EXPIRED",
+                "Cursor predates retained history; re-baseline required.",
+                410,
+            )
+
     statement = (
         select(SyncChangeLog)
         .where(SyncChangeLog.sequence > sequence)
@@ -78,6 +91,17 @@ def list_changes(
         has_more=has_more,
         server_time=datetime.now(UTC),
     )
+
+
+def _oldest_retained_sequence(session: Session) -> int | None:
+    """The oldest sequence still in the change log, or None when empty.
+
+    With trimming (the future GC companion) rows older than the retention
+    window are deleted; a cursor below the oldest surviving row can no
+    longer be served contiguously and must fail with SYNC_CURSOR_EXPIRED.
+    """
+    oldest = session.scalar(func.min(SyncChangeLog.sequence))
+    return int(oldest) if oldest is not None else None
 
 
 def _project(session: Session, row: SyncChangeLog, user_id: str) -> SyncChangeItem | None:

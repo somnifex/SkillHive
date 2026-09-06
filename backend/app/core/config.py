@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     login_max_attempts: int = 5
     login_lockout_minutes: int = 15
 
+    # Blob/change-log GC (docs/development/GC_DESIGN.md §8). All defaults are
+    # the conservative values from the design; the sweep only collects
+    # objects outside every mark root and past the orphan grace.
+    blob_gc_orphan_grace_hours: int = 24
+    change_log_retention_days: int = 90
+    receipt_retention_days: int = 90
+    blob_gc_batch_size: int = 1000
+
 
 @lru_cache
 def get_settings() -> Settings:

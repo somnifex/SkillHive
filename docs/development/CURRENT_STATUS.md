@@ -48,15 +48,19 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 ## Exact next task
 
 Continue on branch `feat/m2-continue`. All M2 desktop code work packages
-(M2.2–M2.7) are code complete and the client-process fault-injection suite
-has run live (see validation truth). Remaining before M2 is fully closed:
+(M2.2–M2.7) are code complete; the client-process reliability suite and the
+M2 exit criteria have been exercised live (see validation truth; remaining
+gaps recorded there). Remaining before M2 is fully closed:
 
 1. **Workspaces/hydration polish (M2.5 leftover)** — pulled `remote_only`
    records carry metadata + manifest only; workspace hydration (materialize
    files from the blob closure) is deferred until a consumer needs it.
 2. **M2.2 destructive GC sweep** — design doc landed; implementation
    deliberately deferred.
-3. **PostgreSQL/MySQL migration re-validation** when a server becomes
+3. **UI-side local-skill surface** — the WebView pages still use the legacy
+   REST/axios path; Tauri commands (`desktop_login`, `sync_now`, local
+   commit/deploy) are exposed but not yet consumed by React pages.
+4. **PostgreSQL/MySQL migration re-validation** when a server becomes
    available (owner bypassed SQL-server flows, 2026-09-04).
 
 ## M2.1 already implemented but unverified
@@ -104,11 +108,12 @@ Scenario results (all through the real client process):
 - **server offline at session refresh** → cycle stops with a transport error, mutation stays `pending` with `retry_count 0` (no state corruption, no backoff miscalibration); server back up → next cycle pushes and converges — OK (validated twice);
 - **server-side device revocation** → `sync_now` stops with `DEVICE_REVOKED` (403), pending mutation state untouched, no server error recorded; un-revoke → next cycle pushes normally — OK;
 - **wrong-password login** → typed `authentication failed (401)`, no credential written — OK; `desktop_logout` → `sync_now` stops quietly with `not signed in` — OK;
-- **hard kill again on the final build**: commit → immediate `Stop-Process` (worker may not have run yet, mutation still `pending`) → relaunch → **startup cycle alone converged** mutation → `acked` rev 1 and server package stored, no manual `sync_now` — OK.
+- **hard kill again on the final build**: commit → immediate `Stop-Process` (worker may not have run yet, mutation still `pending`) → relaunch → **startup cycle alone converged** mutation → `acked` rev 1 and server package stored, no manual `sync_now` — OK;
+- **cross-UI compatibility (M2 exit criterion 5)**: desktop-created skill readable via the existing web UI's REST endpoints with both `content.skill_markdown` and `content.instructions` populated (found and fixed `f63e918`: sync writes mirrored the entrypoint only into `skill_markdown`, so the web editor saw an empty body); then a browser REST edit → desktop pull applied the update (revision 2, `synced`) — full desktop→browser→desktop round trip — OK.
 
 Notes: pull downloads only the package **manifest** per feed row (closure file blobs hydrate lazily by design); an empty feed page still counts as one applied page (`pagesApplied: 1` with zero upserts is the converged-cursor shape, not a failure).
 
-Not covered live: per-mutation mid-dispatch transport backoff (`retryable_error` + `next_attempt_at` timing — unit-tested in `outcomes.rs`, but the kill/race between session refresh and closure upload was not reproducibly injectable in the live process); `permission_denied` outcome (needs a second-user grant-revoke scenario); workspace hydration of pulled content.
+Not covered live: per-mutation mid-dispatch transport backoff (`retryable_error` + `next_attempt_at` timing — unit-tested in `outcomes.rs`, but the kill/race between session refresh and closure upload was not reproducibly injectable in the live process); `permission_denied` outcome (needs a second-user grant-revoke scenario); workspace hydration of pulled content; multiple offline edits queued before the create ACK in one live run (chain ordering is unit-tested).
 
 ### Validated 2026-09-06 (live end-to-end sync protocol run, Windows 11 Pro 10.0.26200)
 

@@ -1327,15 +1327,20 @@ backend/migrations/         schema history
 ```text
 agent.rs                    Agent descriptors/instances/root validation
 blob_store.rs               immutable local content blobs
-skill_snapshot.rs           capture/manifest
+skill_snapshot.rs           capture/manifest/materialize
 snapshot_verifier.rs        byte/hash verification
 workspace.rs                managed editable workspaces
 cache_manager.rs            bounded recoverable cache
 deployment.rs               install/update transaction
 uninstall.rs                uninstall transaction
 local_store/*               durable SQLite state
-credentials.rs              currently stub; M2.3
-sync.rs                     currently stub; M2.6
+credentials.rs              OS credential store boundary (M2.3)
+sync.rs                     serialized sync orchestrator (M2.6)
+sync_client.rs              authenticated HTTP boundary (M2.3/M2.4)
+sync_transport.rs           package closure negotiation/upload (M2.4)
+sync_pull.rs                change-feed pull + verified blob download (M2.5)
+sync_push.rs                receipt-keyed mutation submission (M2.4)
+sync_worker.rs              background triggers/heartbeat (M2.6)
 lib.rs                      Tauri command/composition boundary
 ```
 
@@ -1405,25 +1410,28 @@ Do not add a cloud CI workflow merely to discover this.
 
 ---
 
-## 24. Credentials implementation is not complete
+## 24. Credentials implementation (historical risk — resolved)
 
-`frontend/src-tauri/src/credentials.rs` is still a placeholder boundary.
+`credentials.rs` was the placeholder called out at handoff time; M2.3 replaced
+it with the OS credential store boundary (Windows Credential Manager on
+Windows, verified live 2026-09-06: refresh token present in the store, absent
+from SQLite and WebView storage).
 
-Do not accidentally store tokens in SQLite/WebView while implementing networking before M2.3.
-
-If a temporary developer auth method is required, keep it explicit, local-only and uncommitted; do not turn it into production architecture.
+Keep the invariant: refresh tokens never enter SQLite, the WebView, or logs.
 
 ---
 
-## 25. Sync worker implementation is not complete
+## 25. Sync worker implementation (historical risk — resolved)
 
-`frontend/src-tauri/src/sync.rs` is still a placeholder.
+`sync.rs` was a placeholder at handoff time; M2.6 landed the serialized
+`SyncEngine::run_cycle` composing session → device → push → pull over the
+M2.2–M2.5 primitives (receipt-keyed mutations, package closure transfer,
+durable cursor pull), with background triggers in `sync_worker.rs`. All
+validated live through the real client process on 2026-09-06.
 
-Do not start by writing a loop that calls existing CRUD endpoints.
-
-Existing CRUD endpoints do not provide idempotent receipt semantics, full package transfer or durable cursor pull.
-
-Build M2.2–M2.5 primitives first.
+The prohibition stands as a design rule: the sync loop must never fall back
+to plain CRUD endpoints; it exists precisely because CRUD lacks idempotent
+receipts, package transfer and durable cursors.
 
 ---
 

@@ -57,11 +57,11 @@ No GitHub Actions workflow is enabled for this development phase.
 | M2.0 Shared server mutation path | CODE COMPLETE / PENDING LOCAL VALIDATION | #5 | Implemented and statically reviewed; tests not run |
 | M2.1 Protocol/schema foundation | IN PROGRESS | #6 | Major schema/protocol pieces implemented; must be locally validated and finished |
 | M2.2 Package/blob storage | CODE COMPLETE | #7 | Storage/transport implemented and locally validated; GC design doc landed (`docs/development/GC_DESIGN.md`), destructive sweep deferred by design |
-| M2.3 Device identity/credentials | PLANNED | #8 | Not started beyond schema placeholders/stubs |
-| M2.4 Idempotent push | PLANNED | #9 | Not started |
-| M2.5 Durable pull/change feed | PLANNED | #10 | Schema baseline exists; online implementation not started |
-| M2.6 Desktop sync orchestrator | PLANNED | #11 | `sync.rs` is still a stub |
-| M2.7 Conflict/reliability checkpoint | PLANNED | #12 | Design only |
+| M2.3 Device identity/credentials | CODE COMPLETE | #8 | Server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
+| M2.4 Idempotent push | CODE COMPLETE (desktop) | #9 | Push endpoint validated live; desktop durable ACK transaction, blob negotiation/upload, push client landed |
+| M2.5 Durable pull/change feed | CODE COMPLETE (desktop) | #10 | Page apply + cursor commit + HTTP pull client + verified blob download landed |
+| M2.6 Desktop sync orchestrator | CODE COMPLETE (core) | #11 | `SyncEngine::run_cycle` + background triggers landed; WebView commands wired |
+| M2.7 Conflict/reliability checkpoint | CODE COMPLETE (core) | #12 | Conflict query/resolution + 4xx classifier landed; server-side scenarios validated live 2026-09-06 |
 | M3 Enterprise offline authorization | PLANNED | roadmap | Permission leases/revocation policy |
 | M4 Production hardening | PLANNED | roadmap | Observability, updates, fault testing, release SLO |
 

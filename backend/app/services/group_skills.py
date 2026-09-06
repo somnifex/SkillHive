@@ -81,6 +81,8 @@ class GroupSkillService:
                 skill_id=skill.id,
                 version_policy=data.version_policy,
                 locked_version_id=data.locked_version_id,
+                offline_policy=data.offline_policy,
+                offline_ttl_hours=data.offline_ttl_hours,
                 status="active",
                 granted_by=self.user.id,
             )
@@ -88,6 +90,8 @@ class GroupSkillService:
         else:
             grant.version_policy = data.version_policy
             grant.locked_version_id = data.locked_version_id
+            grant.offline_policy = data.offline_policy
+            grant.offline_ttl_hours = data.offline_ttl_hours
             grant.status = "active"
             grant.revoked_at = None
             grant.revoked_by = None
@@ -104,6 +108,7 @@ class GroupSkillService:
                 "group_id": group_id,
                 "skill_id": skill.id,
                 "version_policy": data.version_policy,
+                "offline_policy": data.offline_policy,
             },
         )
         self.session.commit()
@@ -127,6 +132,10 @@ class GroupSkillService:
         self._validate_policy(skill, policy, locked_version_id)
         grant.version_policy = policy
         grant.locked_version_id = locked_version_id
+        if data.offline_policy is not None:
+            grant.offline_policy = data.offline_policy
+        if "offline_ttl_hours" in data.model_fields_set:
+            grant.offline_ttl_hours = data.offline_ttl_hours
         if data.status:
             grant.status = data.status
         write_audit(
@@ -135,7 +144,11 @@ class GroupSkillService:
             action="group_skill.updated",
             resource_type="group_skill_grant",
             resource_id=grant.id,
-            after_data={"status": grant.status, "version_policy": grant.version_policy},
+            after_data={
+                "status": grant.status,
+                "version_policy": grant.version_policy,
+                "offline_policy": grant.offline_policy,
+            },
         )
         self.session.commit()
         return self._read(grant)

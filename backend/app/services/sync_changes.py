@@ -19,6 +19,7 @@ event.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -27,6 +28,7 @@ from app.core.exceptions import AppError
 from app.models import GroupMember, GroupSkillGrant, Skill, SkillVersion, SyncChangeLog
 from app.schemas.sync import SyncChangeItem, SyncChangesResponse
 from app.services.blob_storage import get_blob_storage
+from app.services.entitlements import issue_entitlement_lease
 from app.services.legacy_package import synthesize_legacy_package
 from app.services.sync_cursor import SyncCursorError, decode_sync_cursor, encode_sync_cursor
 
@@ -120,6 +122,7 @@ def _project(session: Session, row: SyncChangeLog, user_id: str) -> SyncChangeIt
         metadata.setdefault("skill_type", skill.skill_type)
         metadata.setdefault("status", skill.status)
         _ensure_legacy_package(session, skill)
+        _attach_entitlement_lease(session, skill, user_id, metadata)
 
     # The Skill's current package identity is authoritative: the change-log
     # row may predate package synthesis (legacy rows) or the resource may
@@ -170,6 +173,46 @@ def _ensure_legacy_package(session: Session, skill: Skill) -> None:
         return
     skill.current_package_hash = manifest_hash
     current_version.package_manifest_hash = manifest_hash
+
+
+def _attach_entitlement_lease(
+    session: Session,
+    skill: Skill,
+    user_id: str,
+    metadata: dict[str, Any],
+) -> None:
+    """Ships the current signed lease for a managed (grant-gated) skill.
+
+    Only group-managed skills carry leases (M3): the caller's active grant
+    decides both visibility and the offline policy. Personal skills have no
+    lease — their offline use is the user's own content. Lease issuance is
+    deterministic per (grant state, current time) and never fails the pull:
+    a grant that vanished between the visibility check and here simply
+    ships no lease.
+    """
+    if skill.skill_type != "global":
+        return
+    grant = session.scalar(
+        select(GroupSkillGrant).where(
+            GroupSkillGrant.skill_id == skill.id,
+            GroupSkillGrant.status == "active",
+            GroupSkillGrant.group_id.in_(
+                select(GroupMember.group_id).where(
+                    GroupMember.user_id == user_id,
+                    GroupMember.status == "active",
+                )
+            ),
+        )
+    )
+    if grant is None:
+        return
+    token, _lease = issue_entitlement_lease(grant, skill)
+    metadata["entitlement"] = {
+        "lease": token,
+        "permission_level": "use",
+        "offline_policy": grant.offline_policy,
+        "offline_ttl_hours": grant.offline_ttl_hours,
+    }
 
 
 def _skill_visible(session: Session, skill: Skill | None, row: SyncChangeLog, user_id: str) -> bool:

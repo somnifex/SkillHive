@@ -1,8 +1,8 @@
 import re
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.common import ORMModel
 
@@ -138,6 +138,9 @@ class PublishSkillRequest(BaseModel):
     version_id: str | None = None
 
 
+OfflinePolicy = Literal["unlimited", "ttl", "disabled"]
+
+
 class GroupSkillGrantCreate(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -147,18 +150,41 @@ class GroupSkillGrantCreate(BaseModel):
                     "version_policy": "locked",
                     "locked_version_id": "00000000-0000-0000-0000-000000000000",
                 },
+                {"version_policy": "latest", "offline_policy": "ttl", "offline_ttl_hours": 168},
             ]
         }
     )
 
     version_policy: Literal["latest", "locked"] = "latest"
     locked_version_id: str | None = None
+    offline_policy: OfflinePolicy = "unlimited"
+    offline_ttl_hours: int | None = Field(default=None, ge=1, le=24 * 365)
+
+    @model_validator(mode="after")
+    def validate_offline_ttl_pairing(self) -> Self:
+        if self.offline_policy == "ttl" and self.offline_ttl_hours is None:
+            raise ValueError("offline_policy 'ttl' requires offline_ttl_hours")
+        if self.offline_policy != "ttl" and self.offline_ttl_hours is not None:
+            raise ValueError("offline_ttl_hours is only valid with offline_policy 'ttl'")
+        return self
 
 
 class GroupSkillGrantUpdate(BaseModel):
     version_policy: Literal["latest", "locked"] | None = None
     locked_version_id: str | None = None
+    offline_policy: OfflinePolicy | None = None
+    offline_ttl_hours: int | None = Field(default=None, ge=1, le=24 * 365)
     status: Literal["active", "disabled"] | None = None
+
+    @model_validator(mode="after")
+    def validate_offline_ttl_pairing(self) -> Self:
+        # ``None`` on both fields means "not set"; explicit reset of a TTL
+        # goes through offline_policy = "unlimited"/"disabled".
+        if self.offline_policy is None and self.offline_ttl_hours is not None:
+            raise ValueError("offline_ttl_hours requires offline_policy 'ttl' in the same update")
+        if self.offline_policy == "ttl" and self.offline_ttl_hours is None:
+            raise ValueError("offline_policy 'ttl' requires offline_ttl_hours")
+        return self
 
 
 class GroupSkillGrantRead(ORMModel):
@@ -167,6 +193,8 @@ class GroupSkillGrantRead(ORMModel):
     skill_id: str
     version_policy: str
     locked_version_id: str | None
+    offline_policy: str
+    offline_ttl_hours: int | None
     status: str
     granted_by: str
     granted_at: datetime

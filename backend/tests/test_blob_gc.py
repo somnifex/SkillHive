@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from app.models import (
     SyncMutationReceipt,
     User,
 )
-from app.services.blob_gc import run_blob_gc
+from app.services.blob_gc import GcReport, run_blob_gc
 from app.services.blob_registry import register_verified_blob
 from app.services.blob_storage import LocalFilesystemBlobStorage
 from sqlalchemy import create_engine
@@ -35,7 +36,7 @@ NOW = datetime(2026, 9, 6, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
-def gc_session(tmp_path: Path) -> Session:
+def gc_session(tmp_path: Path) -> Generator[Session, None, None]:
     engine = create_engine(
         f"sqlite:///{(tmp_path / 'gc.db').as_posix()}",
         connect_args={"check_same_thread": False},
@@ -144,7 +145,7 @@ def _run(
     session: Session,
     storage: LocalFilesystemBlobStorage,
     **overrides: Any,
-):
+) -> GcReport:
     kwargs: dict[str, Any] = {
         "now": NOW,
         "orphan_grace": timedelta(hours=24),

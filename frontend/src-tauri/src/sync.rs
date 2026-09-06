@@ -110,6 +110,14 @@ pub struct SyncCycleReport {
     pub stopped_reason: Option<String>,
 }
 
+impl SyncCycleReport {
+    /// True when the pull side reached its per-cycle page bound with more
+    /// pages waiting on the server.
+    pub fn has_more(&self) -> bool {
+        self.pages_applied >= crate::sync_pull::MAX_PAGES_PER_CYCLE
+    }
+}
+
 /// The serialized sync engine. All state is durable in SQLite; the engine
 /// holds no sync correctness state of its own.
 #[derive(Debug, Default)]

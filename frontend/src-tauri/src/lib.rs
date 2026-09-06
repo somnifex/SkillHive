@@ -11,10 +11,14 @@ pub mod sync_client;
 pub mod sync_pull;
 pub mod sync_push;
 pub mod sync_transport;
+pub mod sync_worker;
 pub mod uninstall;
 pub mod workspace;
 
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use agent::{AgentDescriptor, AgentDiscoveryResult, AgentInstance, AgentKind, AgentRegistry};
 use blob_store::BlobStore;
@@ -30,6 +34,7 @@ use skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotPolicy};
 use snapshot_verifier::verify_materialized_snapshot;
 use sync::{SyncCycleReport, SyncEngine};
 use sync_client::{DeviceRegistrationRequest, SyncClient};
+use sync_worker::spawn_sync_worker;
 use tauri::Manager;
 use uninstall::{UninstallEngine, UninstallRequest};
 use workspace::{WorkspaceRef, WorkspaceStore};
@@ -830,18 +835,32 @@ pub fn run() {
             let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
             let local_store = store.health()?;
 
-            app.manage(store);
-            app.manage(blobs);
+            // Background sync triggers (plan §13): startup cycle, a slow
+            // heartbeat, and pokes from local commits / explicit requests.
+            // Correctness stays in SQLite; the worker holds no state. The
+            // managed state itself is shared behind Arcs the worker keeps.
+            let shared_store = Arc::new(store);
+            let shared_blobs = Arc::new(blobs);
+            let shared_client = Arc::new(SyncClient::new(
+                &std::env::var("SKILLHIVE_SERVER_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
+            )?);
+            let sync_handle = spawn_sync_worker(
+                Arc::clone(&shared_client),
+                Arc::clone(&shared_store),
+                Arc::clone(&shared_blobs),
+                "SkillHive Desktop",
+            );
+
+            app.manage(shared_store);
+            app.manage(shared_blobs);
             app.manage(workspaces);
             app.manage(deployment);
             app.manage(uninstall);
             app.manage(registry);
             app.manage(DesktopMutationCoordinator::default());
-            let sync_client = sync_client::SyncClient::new(
-                &std::env::var("SKILLHIVE_SERVER_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
-            )?;
-            app.manage(sync_client);
+            app.manage(shared_client);
+            app.manage(sync_handle);
             app.manage(DesktopStartupStatus {
                 local_store,
                 recovered_in_flight_mutations,

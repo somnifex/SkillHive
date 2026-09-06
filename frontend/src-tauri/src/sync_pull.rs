@@ -94,6 +94,11 @@ impl SyncClient {
     }
 }
 
+/// Bound on change pages applied per pull drain so a server feeding an
+/// unbounded `hasMore` stream cannot pin the worker; the next cycle
+/// resumes from the durable cursor.
+pub const MAX_PAGES_PER_CYCLE: usize = 100;
+
 /// Pulls and durably applies change pages until the feed is caught up or a
 /// page fails to apply. Applies pages through
 /// [`LocalStore::apply_changes_page`], which commits each page's cursor in
@@ -111,10 +116,6 @@ pub fn pull_changes(
         blobs_downloaded: 0,
         has_more: false,
     };
-
-    // Bound the loop so a server feeding an unbounded has_more stream cannot
-    // pin the worker forever; the next cycle resumes from the durable cursor.
-    const MAX_PAGES_PER_CYCLE: usize = 100;
 
     loop {
         let cursor = store.sync_cursor()?;

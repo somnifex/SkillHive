@@ -267,11 +267,20 @@ fn apply_definitive_error(
         ],
     )?;
 
-    // Preserve the local immutable snapshot; only the sync state changes so
-    // the UI can surface the outcome without losing content.
+    // A conflict carries the server's remote head in
+    // `conflict_head_revision`; recording it on the Skill row gives the
+    // resolution path the true base to re-queue against. Without this the
+    // stale local revision would be reused and the retried update would
+    // conflict again.
     transaction.execute(
-        "UPDATE local_skills SET sync_state = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
-        params![raw.skill_id, skill_state],
+        r#"
+        UPDATE local_skills
+        SET remote_revision = COALESCE(?3, remote_revision),
+            sync_state = ?2,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?1
+        "#,
+        params![raw.skill_id, skill_state, outcome.conflict_head_revision],
     )?;
     Ok(())
 }
@@ -419,6 +428,9 @@ mod tests {
         let skill = store.get_skill("skill-1").expect("read").expect("skill");
         assert_eq!(skill.sync_state, SkillSyncState::Conflict);
         assert_eq!(skill.current_blob_hash, "sha256:abc123");
+        // The conflict's remote head is persisted on the Skill row so the
+        // resolution path re-queues against the true server head.
+        assert_eq!(skill.remote_revision, Some(9));
     }
 
     #[test]

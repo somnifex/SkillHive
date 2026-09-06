@@ -41,7 +41,7 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 | M2.4 Idempotent push (#9) | CODE COMPLETE (desktop) — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed |
 | M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration deferred until a consumer needs it |
 | M2.6 Desktop sync orchestrator (#11) | CODE COMPLETE (core) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake outstanding |
-| M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (core) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; the 12 reliability scenarios of Issue #12 still require a live end-to-end run |
+| M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (core) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side scenarios validated 2026-09-06 (see validation truth)**; client-process fault-injection scenarios remain for a full Tauri run |
 | M3 Enterprise offline authorization | PLANNED |
 | M4 Production hardening | PLANNED |
 
@@ -51,16 +51,14 @@ Continue on branch `feat/m2-continue`. All M2 desktop code work packages
 (M2.2–M2.7 core) are code complete; what remains before M2 can be called
 VERIFIED:
 
-1. **End-to-end reliability run (Issue #12)** — start the local backend
-   (`SKILLHIVE_SERVER_URL=http://127.0.0.1:8000`) and the desktop exe, then
-   work through the 12 scenarios in `LOCAL_AGENT_HANDOFF.md` §14 (response
-   lost after commit, repeated mutation, kill after HTTP ACK, offline edit
-   chains, two-device conflict, tombstones, backoff persistence, pull
-   interruption, restart with pending outbox/cursor). Record results per
-   `LOCAL_VALIDATION_CHECKLIST.md` §41.
-2. **Background triggers (M2.6 remainder)** — app-startup sync, network-
+1. **Background triggers (M2.6 remainder)** — app-startup sync, network-
    recovery trigger, and a bounded periodic wake; `sync_now` (explicit
    user request) already works.
+2. **Client-process fault-injection scenarios (Issue #12 remainder)** —
+   kill after HTTP ACK before SQLite ACK, pull interruption between
+   pages, restart with pending outbox/cursor: these need the actual Tauri
+   process driven against the live server. Server-side behavior for every
+   scenario was validated live on 2026-09-06.
 3. **M2.2 leftover (Issue #7)** — mark-and-sweep GC design doc.
 
 Outstanding leftovers: M2.2 mark-and-sweep GC design doc (Issue #7);

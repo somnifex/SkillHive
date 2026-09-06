@@ -28,6 +28,7 @@
 
 use std::time::Duration;
 
+use chrono::Utc;
 use serde::Serialize;
 
 use crate::blob_store::BlobStore;
@@ -213,6 +214,11 @@ impl SyncEngine {
                 return Err(SyncCycleError::from(error));
             }
         };
+
+        // M3: apply offline-policy expiry after each pull so a lease that
+        // ran out mid-session is reconciled without waiting for a restart.
+        let expired_entitlements = store.expire_due_entitlements(Utc::now())?;
+        let _ = expired_entitlements;
 
         Ok(SyncCycleReport {
             pushed,

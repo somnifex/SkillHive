@@ -224,12 +224,19 @@ fn apply_acked(
 
     // The Skill is fully synchronized only when no later mutation for it is
     // still unacked; otherwise its head state remains governed by the chain.
+    //
+    // `conflict` is included in the clearable set under the same gate: a
+    // real conflict always keeps a mutation row in state `conflict`, which
+    // is unacked and holds the gate closed. When every mutation has acked,
+    // any lingering `conflict` label is a stale wedge (e.g. the Skill's own
+    // change-feed echo pulled mid-chain while updates were pending); the
+    // head revision just acked is authoritative, so the Skill is synced.
     transaction.execute(
         r#"
         UPDATE local_skills
         SET sync_state = 'synced', updated_at = CURRENT_TIMESTAMP
         WHERE id = ?1
-          AND sync_state IN ('dirty', 'uploading', 'sync_error')
+          AND sync_state IN ('dirty', 'uploading', 'sync_error', 'conflict')
           AND NOT EXISTS (
               SELECT 1 FROM local_mutations later
               WHERE later.skill_id = local_skills.id
@@ -431,6 +438,88 @@ mod tests {
         // The conflict's remote head is persisted on the Skill row so the
         // resolution path re-queues against the true server head.
         assert_eq!(skill.remote_revision, Some(9));
+    }
+
+    #[test]
+    fn genuine_conflict_stays_until_resolution_acks() {
+        let (_temp, store) = open_temp_store();
+        let mutation = store
+            .commit_skill_edit(sample_edit("skill-1"))
+            .expect("commit");
+        store
+            .apply_mutation_outcome(&MutationOutcome {
+                mutation_id: mutation.id.clone(),
+                status: "conflict".to_owned(),
+                remote_skill_id: Some("remote-1".to_owned()),
+                revision: None,
+                conflict_head_revision: Some(9),
+                error_code: Some("REVISION_CONFLICT".to_owned()),
+                message: Some("server head advanced".to_owned()),
+            })
+            .expect("apply");
+
+        // A second (acked) mutation on the same Skill must NOT clear the
+        // conflict: the conflicted row is still unacked and holds the gate
+        // closed until the user resolves it.
+        {
+            let connection = store.lock_connection().expect("conn");
+            connection
+                .execute(
+                    "INSERT INTO local_mutations(id, skill_id, local_sequence, operation, \
+                     payload_hash, state) \
+                     VALUES ('m-followup', 'skill-1', 2, 'update', 'sha256:abc', 'pending')",
+                    [],
+                )
+                .expect("insert follow-up");
+        }
+        store
+            .apply_mutation_outcome(&ack_outcome("m-followup", 10))
+            .expect("ack follow-up");
+        let skill = store.get_skill("skill-1").expect("read").expect("skill");
+        assert_eq!(skill.sync_state, SkillSyncState::Conflict);
+        assert_eq!(
+            store.list_conflicts().expect("conflicts").len(),
+            1,
+            "the genuine conflict must stay offered for resolution"
+        );
+    }
+
+    #[test]
+    fn stale_conflict_label_clears_when_chain_fully_acked() {
+        // A change-feed echo pulled mid-chain while updates were pending can
+        // leave the Skill labeled `conflict` even though no mutation row is
+        // actually conflicted. When the final mutation acks with no unacked
+        // row remaining, the stale label must clear (the acked revision is
+        // authoritative), or the Skill would stay wedged in `conflict`.
+        let (_temp, store) = open_temp_store();
+        let create = store
+            .commit_skill_edit(sample_edit("skill-1"))
+            .expect("create");
+        let mut update = sample_edit("skill-1");
+        update.operation = MutationOperation::Update;
+        let update = store.commit_skill_edit(update).expect("update");
+
+        store
+            .apply_mutation_outcome(&ack_outcome(&create.id, 1))
+            .expect("ack create");
+        {
+            let connection = store.lock_connection().expect("conn");
+            connection
+                .execute(
+                    "UPDATE local_skills SET sync_state = 'conflict' WHERE id = 'skill-1'",
+                    [],
+                )
+                .expect("simulate mid-chain echo conflict");
+        }
+
+        store
+            .apply_mutation_outcome(&ack_outcome(&update.id, 2))
+            .expect("ack update");
+        let skill = store.get_skill("skill-1").expect("read").expect("skill");
+        assert_eq!(skill.sync_state, SkillSyncState::Synced);
+        assert_eq!(skill.remote_revision, Some(2));
+        // Nothing for the conflict picker to offer: no conflicted mutation.
+        assert!(store.list_conflicts().expect("conflicts").is_empty());
     }
 
     #[test]

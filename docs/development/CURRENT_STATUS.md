@@ -63,6 +63,13 @@ gaps recorded there). Remaining before M2 is fully closed:
 4. **PostgreSQL/MySQL migration re-validation** when a server becomes
    available (owner bypassed SQL-server flows, 2026-09-04).
 
+Legacy package synthesis (plan §17 / handoff §9.6) is **landed** (commit
+`b0914e5`): browser-created Skills now carry a synthesized SKILL.md
+package on the pull feed, and pre-existing package-less rows are
+synthesized lazily on first pull — covered by dedicated backend tests
+(`test_sync_changes_api.py`), not yet re-validated live through the
+desktop CDP harness.
+
 ## M2.1 already implemented but unverified
 
 The merged code already contains:

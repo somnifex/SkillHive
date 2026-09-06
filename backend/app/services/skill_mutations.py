@@ -10,6 +10,8 @@ from app.core.exceptions import AppError
 from app.db.base import utc_now
 from app.models import Skill, SkillVersion, SyncChangeLog
 from app.services.audit import write_audit
+from app.services.blob_storage import BlobStorage, get_blob_storage
+from app.services.legacy_package import synthesize_legacy_package
 
 
 class SkillMutationService:
@@ -32,6 +34,36 @@ class SkillMutationService:
     def __init__(self, session: Session, actor_user_id: str) -> None:
         self.session = session
         self.actor_user_id = actor_user_id
+        self._storage: BlobStorage | None = None
+
+    def _package_hash_for_content(
+        self,
+        *,
+        slug: str,
+        name: str,
+        description: str,
+        content: Mapping[str, Any],
+        package_manifest_hash: str | None,
+    ) -> str | None:
+        """Resolve the package identity for a new version row.
+
+        An explicit ``package_manifest_hash`` (the sync path) wins. A legacy
+        content-only write (browser REST path) synthesizes the minimal
+        ``SKILL.md`` package (plan §17) so the resulting version carries an
+        addressable package the desktop can pull and materialize.
+        """
+        if package_manifest_hash is not None:
+            return package_manifest_hash
+        if self._storage is None:
+            self._storage = get_blob_storage()
+        return synthesize_legacy_package(
+            self.session,
+            self._storage,
+            slug=slug,
+            name=name,
+            description=description,
+            content=dict(content),
+        )
 
     def _emit_change_event(
         self,
@@ -102,13 +134,22 @@ class SkillMutationService:
         self.session.add(skill)
         self.session.flush()
 
+        resolved_package_hash = self._package_hash_for_content(
+            slug=skill.slug,
+            name=skill.name,
+            description=skill.description,
+            content=content,
+            package_manifest_hash=package_manifest_hash,
+        )
+        skill.current_package_hash = resolved_package_hash
+
         created_version = self._create_version_row(
             skill=skill,
             version=version,
             revision=skill.sync_revision,
             content=content,
             manifest=manifest,
-            package_manifest_hash=package_manifest_hash,
+            package_manifest_hash=resolved_package_hash,
             package_size_bytes=package_size_bytes,
             dependency_config=dependency_config,
             change_log=change_log,
@@ -168,6 +209,13 @@ class SkillMutationService:
             changed = True
             version_name = version or self.next_patch_version(skill)
             self.ensure_version_available(skill.id, version_name)
+            resolved_package_hash = self._package_hash_for_content(
+                slug=skill.slug,
+                name=skill.name,
+                description=skill.description,
+                content=content,
+                package_manifest_hash=package_manifest_hash,
+            )
             version_manifest = (
                 manifest if manifest is not None else {"name": skill.slug, "schema_version": 1}
             )
@@ -178,14 +226,14 @@ class SkillMutationService:
                 revision=next_revision,
                 content=content,
                 manifest=version_manifest,
-                package_manifest_hash=package_manifest_hash,
+                package_manifest_hash=resolved_package_hash,
                 package_size_bytes=package_size_bytes,
                 dependency_config=dependency_config or {},
                 change_log=change_log,
                 status=version_status,
             )
             skill.current_version_id = created_version.id
-            skill.current_package_hash = package_manifest_hash
+            skill.current_package_hash = resolved_package_hash
             if demote_published_on_new_version and skill.status == "published":
                 skill.status = "draft"
 
@@ -227,20 +275,27 @@ class SkillMutationService:
     ) -> SkillVersion:
         self.ensure_version_available(skill.id, version)
         next_revision = skill.sync_revision + 1
+        resolved_package_hash = self._package_hash_for_content(
+            slug=skill.slug,
+            name=skill.name,
+            description=skill.description,
+            content=content,
+            package_manifest_hash=package_manifest_hash,
+        )
         created_version = self._create_version_row(
             skill=skill,
             version=version,
             revision=next_revision,
             content=content,
             manifest=manifest,
-            package_manifest_hash=package_manifest_hash,
+            package_manifest_hash=resolved_package_hash,
             package_size_bytes=package_size_bytes,
             dependency_config=dependency_config,
             change_log=change_log,
             status=version_status,
         )
         skill.current_version_id = created_version.id
-        skill.current_package_hash = package_manifest_hash
+        skill.current_package_hash = resolved_package_hash
         skill.sync_revision = next_revision
 
         if publish_skill:

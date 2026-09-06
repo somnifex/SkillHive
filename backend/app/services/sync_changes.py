@@ -24,8 +24,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
-from app.models import GroupMember, GroupSkillGrant, Skill, SyncChangeLog
+from app.models import GroupMember, GroupSkillGrant, Skill, SkillVersion, SyncChangeLog
 from app.schemas.sync import SyncChangeItem, SyncChangesResponse
+from app.services.blob_storage import get_blob_storage
+from app.services.legacy_package import synthesize_legacy_package
 from app.services.sync_cursor import SyncCursorError, decode_sync_cursor, encode_sync_cursor
 
 DEFAULT_PULL_LIMIT = 100
@@ -62,6 +64,12 @@ def list_changes(
     changes = [
         item for item in (_project(session, row, user_id) for row in page) if item is not None
     ]
+    # Lazy legacy synthesis (plan §17): a pre-existing Skill with no package
+    # gets one the first time it is pulled. The synthesized blobs are
+    # verified and the Skill row updated before the page is returned, so the
+    # shipped hash is immediately addressable via the blob endpoint.
+    if session.new or session.dirty:
+        session.commit()
     last_sequence = page[-1].sequence if page else sequence
     return SyncChangesResponse(
         protocol_version=1,
@@ -87,6 +95,16 @@ def _project(session: Session, row: SyncChangeLog, user_id: str) -> SyncChangeIt
         metadata.setdefault("slug", skill.slug)
         metadata.setdefault("skill_type", skill.skill_type)
         metadata.setdefault("status", skill.status)
+        _ensure_legacy_package(session, skill)
+
+    # The Skill's current package identity is authoritative: the change-log
+    # row may predate package synthesis (legacy rows) or the resource may
+    # have advanced since the event fired.
+    package_hash = (
+        skill.current_package_hash
+        if skill is not None and row.operation != _OPERATION_DELETE
+        else row.package_manifest_hash
+    )
 
     return SyncChangeItem(
         sequence=row.sequence,
@@ -94,10 +112,40 @@ def _project(session: Session, row: SyncChangeLog, user_id: str) -> SyncChangeIt
         resource_id=row.resource_id,
         resource_revision=row.resource_revision,
         operation=row.operation,
-        package_manifest_hash=row.package_manifest_hash,
+        package_manifest_hash=package_hash,
         metadata=metadata,
         created_at=row.created_at,
     )
+
+
+def _ensure_legacy_package(session: Session, skill: Skill) -> None:
+    """Synthesize the minimal package for a legacy Skill exactly once.
+
+    Idempotent: a Skill that already carries ``current_package_hash`` is
+    untouched; synthesis itself is deterministic (same content → same
+    hashes) so a racing repeated run converges on the same objects.
+    """
+    if skill.current_package_hash is not None:
+        return
+    current_version = (
+        session.get(SkillVersion, skill.current_version_id)
+        if skill.current_version_id is not None
+        else None
+    )
+    if current_version is None:
+        return
+    manifest_hash = synthesize_legacy_package(
+        session,
+        get_blob_storage(),
+        slug=skill.slug,
+        name=skill.name,
+        description=skill.description,
+        content=dict(current_version.content or {}),
+    )
+    if manifest_hash is None:
+        return
+    skill.current_package_hash = manifest_hash
+    current_version.package_manifest_hash = manifest_hash
 
 
 def _skill_visible(session: Session, skill: Skill | None, row: SyncChangeLog, user_id: str) -> bool:

@@ -206,12 +206,14 @@ def _attach_entitlement_lease(
     )
     if grant is None:
         return
-    token, _lease = issue_entitlement_lease(grant, skill)
+    token, lease = issue_entitlement_lease(grant, skill)
     metadata["entitlement"] = {
         "lease": token,
-        "permission_level": "use",
+        "permission_level": lease.permission_level,
         "offline_policy": grant.offline_policy,
         "offline_ttl_hours": grant.offline_ttl_hours,
+        "issued_at": lease.issued_at.isoformat(),
+        "expires_at": lease.expires_at.isoformat(),
     }
 
 

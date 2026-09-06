@@ -276,6 +276,12 @@ def _handle_create(
         content={
             "schema_version": 1,
             "skill_markdown": entrypoint_markdown,
+            # Plan §17: sync writes populate enough legacy content for the
+            # current web UI to keep displaying and editing the Skill. The
+            # web editor reads/writes `instructions`; mirroring the
+            # entrypoint there keeps a browser edit from seeing the body as
+            # empty. The package manifest stays canonical for the desktop.
+            "instructions": entrypoint_markdown,
         },
         manifest={"name": request.metadata.slug, "schema_version": 1},
         dependency_config={},
@@ -387,6 +393,9 @@ def _handle_update(
         content={
             "schema_version": 1,
             "skill_markdown": entrypoint_markdown,
+            # Mirrors the create path: keep the legacy `instructions` body in
+            # sync so the web UI's editor/preview keeps working (plan §17).
+            "instructions": entrypoint_markdown,
         },
         manifest={"name": skill.slug, "schema_version": 1},
         dependency_config={},

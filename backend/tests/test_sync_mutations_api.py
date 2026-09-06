@@ -195,10 +195,13 @@ def test_create_mutation_acks_and_replays_receipt(
     assert items[0]["id"] == remote_skill_id
 
     # Legacy synthesis: the web UI's skill_markdown mirrors the SKILL.md
-    # entrypoint of the uploaded package (plan §17).
+    # entrypoint of the uploaded package (plan §17), and the legacy
+    # `instructions` body is mirrored so the web editor keeps working.
     detail = push_client.get(f"/api/v1/skills/{remote_skill_id}", headers=headers)
     assert detail.status_code == 200
-    assert detail.json()["current_version"]["content"]["skill_markdown"] == "# Demo skill"
+    content = detail.json()["current_version"]["content"]
+    assert content["skill_markdown"] == "# Demo skill"
+    assert content["instructions"] == "# Demo skill"
 
 
 def test_update_mutation_enforces_base_revision(

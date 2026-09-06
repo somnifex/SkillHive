@@ -77,7 +77,9 @@ export function SkillsPage() {
           tags: values.tags,
           status: values.status,
           ...(values.instructions !==
-          (editing.current_version?.content.instructions ?? "")
+          (editing.current_version?.content.instructions ??
+            editing.current_version?.content.skill_markdown ??
+            "")
             ? { content: { instructions: values.instructions } }
             : {}),
         });
@@ -127,7 +129,10 @@ export function SkillsPage() {
       category: data.category,
       tags: data.tags,
       status: data.status,
-      instructions: data.current_version?.content.instructions ?? "",
+      instructions:
+        data.current_version?.content.instructions ??
+        data.current_version?.content.skill_markdown ??
+        "",
     });
   };
 
@@ -324,7 +329,9 @@ export function SkillsPage() {
             <div>
               <Typography.Title level={5}>当前指令</Typography.Title>
               <pre className="content-preview">
-                {detail.current_version?.content.instructions || "暂无内容"}
+                {detail.current_version?.content.instructions ||
+                  detail.current_version?.content.skill_markdown ||
+                  "暂无内容"}
               </pre>
             </div>
             <div>

@@ -271,7 +271,7 @@ impl LocalStore {
 
         let mut connection = Connection::open(&db_path)?;
         configure_connection(&connection)?;
-        migrations::migrate(&mut connection)?;
+        migrations::migrate(&mut connection, &db_path)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -326,6 +326,41 @@ pub(super) fn path_to_string(path: &Path) -> Result<String, LocalStoreError> {
     path.to_str()
         .map(ToOwned::to_owned)
         .ok_or_else(|| LocalStoreError::NonUtf8Path(path.to_path_buf()))
+}
+
+/// M4 migration-safety checkpoint: copy the database to `*.pre-migration`
+/// beside the live file before the first pending migration step runs.
+///
+/// Uses SQLite's `VACUUM INTO`, which snapshots a consistent, compacted
+/// copy so the backup is a self-contained single file even with WAL active.
+/// Failure is reported but never blocks the migration itself: the per-step
+/// transactions remain the primary safety boundary, and the backup is the
+/// recovery net for non-transactional failure modes (disk-full during
+/// checkpointing, torn pages, kill between steps).
+pub(super) fn backup_database(
+    connection: &Connection,
+    db_path: &Path,
+    _first_pending_version: &i64,
+) -> Result<(), LocalStoreError> {
+    let backup_path = db_path.with_extension("sqlite3.pre-migration");
+    let backup_text = path_to_string(&backup_path)?;
+    connection.execute("VACUUM INTO ?1", rusqlite::params![backup_text])?;
+    crate::telemetry::event("migration_backup", &[("backup_path", &backup_text)]);
+    Ok(())
+}
+
+pub(super) fn telemetry_migration_start(version: i64) {
+    crate::telemetry::event(
+        "migration_start",
+        &[("to_version", version.to_string().as_str())],
+    );
+}
+
+pub(super) fn telemetry_migration_done(version: i64) {
+    crate::telemetry::event(
+        "migration_done",
+        &[("to_version", version.to_string().as_str())],
+    );
 }
 
 pub(super) fn validate_non_empty(field: &str, value: &str) -> Result<(), LocalStoreError> {

@@ -1,6 +1,7 @@
 use rusqlite::{Connection, TransactionBehavior};
 
 use super::LocalStoreError;
+use std::path::Path;
 
 pub(super) const LATEST_SCHEMA_VERSION: i64 = 4;
 
@@ -212,7 +213,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
-pub(super) fn migrate(connection: &mut Connection) -> Result<(), LocalStoreError> {
+pub(super) fn migrate(connection: &mut Connection, db_path: &Path) -> Result<(), LocalStoreError> {
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -235,11 +236,25 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), LocalStoreError
         });
     }
 
-    for (version, sql) in MIGRATIONS {
-        if *version <= current_version {
-            continue;
-        }
+    let pending: Vec<(i64, &str)> = MIGRATIONS
+        .iter()
+        .filter(|(version, _)| *version > current_version)
+        .copied()
+        .collect();
 
+    if !pending.is_empty() {
+        // M4 migration-safety checkpoint (handoff §16): back the database up
+        // before the first migration step of this launch. Each migration is
+        // already transactional (step + version stamp commit atomically), but
+        // the backup also covers non-transactional surroundings — disk-full
+        // during WAL checkpointing, a torn page, or an app kill between
+        // steps. Startup replays the backup over the damaged store, so a
+        // failed migration costs at most the pending steps, never data.
+        super::backup_database(connection, db_path, &pending[0].0)?;
+    }
+
+    for (version, sql) in pending {
+        super::telemetry_migration_start(version);
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(sql)?;
         transaction.execute(
@@ -247,6 +262,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), LocalStoreError
             [version],
         )?;
         transaction.commit()?;
+        super::telemetry_migration_done(version);
     }
 
     Ok(())

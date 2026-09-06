@@ -41,32 +41,23 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 | M2.4 Idempotent push (#9) | CODE COMPLETE (desktop) — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed |
 | M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration deferred until a consumer needs it |
 | M2.6 Desktop sync orchestrator (#11) | CODE COMPLETE (core) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake outstanding |
-| M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (core) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side scenarios validated 2026-09-06 (see validation truth)**; client-process fault-injection scenarios remain for a full Tauri run |
+| M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (core) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side AND live client-process scenarios validated 2026-09-06 (see validation truth)** |
 | M3 Enterprise offline authorization | PLANNED |
 | M4 Production hardening | PLANNED |
 
 ## Exact next task
 
 Continue on branch `feat/m2-continue`. All M2 desktop code work packages
-(M2.2–M2.7 core) are code complete; what remains before M2 can be called
-VERIFIED:
+(M2.2–M2.7) are code complete and the client-process fault-injection suite
+has run live (see validation truth). Remaining before M2 is fully closed:
 
-1. **Background triggers (M2.6 remainder)** — DONE: startup cycle, bounded
-   periodic wake, pull-backlog self-poke, and commit-triggered sync landed
-   (`sync_worker.rs`, commits d859593/1a00341).
-2. **Client-process fault-injection scenarios (Issue #12 remainder)** —
-   kill after HTTP ACK before SQLite ACK, pull interruption between
-   pages, restart with pending outbox/cursor: these need the actual Tauri
-   process driven against the live server. Server-side behavior for every
-   scenario was validated live on 2026-09-06.
-3. **M2.2 leftover (Issue #7)** — DONE: mark-and-sweep GC design doc landed
-   as `docs/development/GC_DESIGN.md` (roots, sweep contract, cursor
-   retention, deferred destructive work package).
-
-Outstanding leftovers: client-process fault-injection scenarios (Issue #12
-remainder, needs a driven Tauri process); PostgreSQL/MySQL migration
-re-validation when a server becomes available (owner bypassed SQL-server
-flows, 2026-09-04).
+1. **Workspaces/hydration polish (M2.5 leftover)** — pulled `remote_only`
+   records carry metadata + manifest only; workspace hydration (materialize
+   files from the blob closure) is deferred until a consumer needs it.
+2. **M2.2 destructive GC sweep** — design doc landed; implementation
+   deliberately deferred.
+3. **PostgreSQL/MySQL migration re-validation** when a server becomes
+   available (owner bypassed SQL-server flows, 2026-09-04).
 
 ## M2.1 already implemented but unverified
 
@@ -87,6 +78,33 @@ The merged code already contains:
 Do not interpret these files as verified merely because PR #3 was merged.
 
 ## Validation truth
+
+### Validated 2026-09-06 (live desktop client-process E2E, real Tauri process against live server)
+
+Toolchain: backend `uvicorn` 127.0.0.1:8000 on SQLite (`tmp/e2e-server/`), Vite dev server, debug `skillhive-desktop.exe` with WebView2 CDP debugging (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`). The WebView was driven through the Chrome DevTools Protocol (`Runtime.evaluate` → `window['__TAURI__']['core'].invoke(...)`) so every scenario runs the app's real Rust command path and real runtime state (`%LOCALAPPDATA%/app.skillhive.desktop`), not a test double.
+
+**Four real desktop bugs found and fixed by this run:**
+
+- `54e341f` — `state not managed` on every command: setup managed `Arc<LocalStore>` while commands expect `LocalStore` (Tauri resolves by exact TypeId, no auto-deref). Fixed by managing plain values and giving the sync worker its own handles to the same SQLite/blob paths (safe: WAL + busy_timeout, content-addressed idempotent blob writes).
+- `54e341f` — pull upsert crashed with `UNIQUE constraint failed: local_skills.remote_id`: a pushed create stores the server ID only in `remote_id` under the client-generated local key, so the feed echo must resolve by `id OR remote_id` and merge (`apply_upsert`/`apply_tombstone`), inserting under the local key when absent. Unit tests added.
+- `506a8a2` — every follow-up update got 422 `VALIDATION_ERROR` ("update mutation requires remoteSkillId"): `submit_mutation` read the remote ID only from the mutation row's `acknowledged_remote_id` (NULL for updates); now falls back to the skill's `remote_id`.
+- `4c66ec3` — conflict never converged: `apply_definitive_error` never persisted the server's `conflict_head_revision` onto the skill row, so keep-local re-queued against a stale base and re-conflicted forever. Now `remote_revision = COALESCE(?3, remote_revision)`; validated live through full convergence.
+
+Scenario results (all through the real client process):
+
+- login → device registration → refresh token lands in **Windows Credential Manager** (`refresh-token.app.skillhive.desktop`); SQLite bytes and WebView storage contain no tokens/passwords — OK;
+- `sync_now` push/pull cycle; create → server revision 1, updates with base revisions → acked revisions — OK;
+- mutation replay → receipt idempotency, single server effect — OK;
+- **hard kill of the desktop process with a pending outbox mutation → restart recovery re-queued the same mutation ID, server replayed the receipt, converged (cursor advanced, no duplicate effect)** — OK;
+- live REVISION_CONFLICT (server-side edit between local commits) → skill enters `conflict` with remote head recorded → `resolve_conflict(keep_local)` re-queues against the true head → acked, both sides converge at the same revision — OK;
+- REST delete → pulled tombstone removed the local row — OK;
+- multi-file skill create → package closure upload: manifest + file blobs stored server-side, `current_package_hash` matches — OK;
+- **blob-download pull path**: local manifest blob deleted + cursor rewound → full re-pull reapplied the 7-event feed (6 upserts + 1 tombstone) and re-downloaded the manifest, digest-verified before storage — OK;
+- 422 `VALIDATION_ERROR` on a malformed update → mutation `permanent_error`, no retry storm — OK.
+
+Notes: pull downloads only the package **manifest** per feed row (closure file blobs hydrate lazily by design); an empty feed page still counts as one applied page (`pagesApplied: 1` with zero upserts is the converged-cursor shape, not a failure).
+
+Not covered live: `permission_denied` outcome (needs a second-user grant-revoke scenario), transport-failure backoff timing in the real process, workspace hydration of pulled content.
 
 ### Validated 2026-09-06 (live end-to-end sync protocol run, Windows 11 Pro 10.0.26200)
 
@@ -109,7 +127,7 @@ Scenario results (HTTP exercised with curl/urllib exactly as the desktop client 
 - corrupt blob upload (digest mismatch) → 400; size-mismatch upload → 400; correct upload + roundtrip download byte-identical; missing blob → 404 — OK;
 - final change feed: 5 events (browser create, desktop create, update, tombstone, second-device update) — OK.
 
-Not covered live (unit-level coverage exists in `cargo test`/`pytest`): client-side SQLite apply paths (`apply_changes_page`, `apply_mutation_outcome`, conflict resolution) — those are covered by 75 desktop unit tests but not yet against this live server from the actual Tauri process.
+Not covered live (unit-level coverage exists in `cargo test`/`pytest`): superseded by the client-process run above, which drove `apply_changes_page`, `apply_mutation_outcome`, and conflict resolution from the actual Tauri process against this same server contract.
 
 ### Validated 2026-09-05 (local agent session, Windows 11 Pro 10.0.26200)
 

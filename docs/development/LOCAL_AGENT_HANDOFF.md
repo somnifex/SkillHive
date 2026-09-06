@@ -61,7 +61,7 @@ No GitHub Actions workflow is enabled for this development phase.
 | M2.4 Idempotent push | CODE COMPLETE (desktop) | #9 | Push endpoint validated live; desktop durable ACK transaction, blob negotiation/upload, push client landed |
 | M2.5 Durable pull/change feed | CODE COMPLETE (desktop) | #10 | Page apply + cursor commit + HTTP pull client + verified blob download landed |
 | M2.6 Desktop sync orchestrator | CODE COMPLETE (core) | #11 | `SyncEngine::run_cycle` + background triggers landed; WebView commands wired |
-| M2.7 Conflict/reliability checkpoint | CODE COMPLETE (core) | #12 | Conflict query/resolution + 4xx classifier landed; server-side scenarios validated live 2026-09-06 |
+| M2.7 Conflict/reliability checkpoint | CODE COMPLETE (core) | #12 | Conflict query/resolution + 4xx classifier landed; server-side and live client-process scenarios validated 2026-09-06 |
 | M3 Enterprise offline authorization | PLANNED | roadmap | Permission leases/revocation policy |
 | M4 Production hardening | PLANNED | roadmap | Observability, updates, fault testing, release SLO |
 

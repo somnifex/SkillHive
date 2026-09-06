@@ -12,6 +12,7 @@ pub mod sync_pull;
 pub mod sync_push;
 pub mod sync_transport;
 pub mod sync_worker;
+pub mod telemetry;
 pub mod uninstall;
 pub mod workspace;
 
@@ -770,6 +771,10 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let data_dir = app.path().app_local_data_dir()?;
+            // M4: structured telemetry first so every later startup event is
+            // captured. Log-write failures never affect correctness.
+            telemetry::init(data_dir.join("logs").join("skillhive.log"));
+            telemetry::event("startup_begin", &[]);
             let store = LocalStore::open(data_dir.join("skillhive.sqlite3"))?;
             let recovered_in_flight_mutations = store.recover_in_flight_mutations()?;
             // M3 offline-policy reconciliation: expire any entitlement whose
@@ -835,7 +840,7 @@ pub fn run() {
 
             let registry = AgentRegistry::builtin();
             let agent_results = discover_and_reconcile_agents(&store, &registry)?;
-            let agent_reconciliation_errors = agent_results
+            let agent_reconciliation_errors: Vec<String> = agent_results
                 .into_iter()
                 .filter_map(|result| {
                     result
@@ -889,6 +894,38 @@ pub fn run() {
             app.manage(registry);
             app.manage(DesktopMutationCoordinator::default());
             app.manage(sync_handle);
+            // M4: one structured startup summary. Counts and IDs only —
+            // never tokens, secrets, or skill bodies. Computed before the
+            // managed struct below consumes the owned values.
+            telemetry::event(
+                "startup_complete",
+                &[
+                    (
+                        "recovered_mutations",
+                        &recovered_in_flight_mutations.to_string(),
+                    ),
+                    (
+                        "deployment_recovered",
+                        &deployment_recovery.catalog_commits.len().to_string(),
+                    ),
+                    (
+                        "deployment_failed",
+                        &deployment_recovery.failed.len().to_string(),
+                    ),
+                    (
+                        "expired_entitlements",
+                        &expired_entitlements.len().to_string(),
+                    ),
+                    (
+                        "agent_reconciliation_errors",
+                        &agent_reconciliation_errors.len().to_string(),
+                    ),
+                    (
+                        "cache_error",
+                        if cache_error.is_some() { "1" } else { "0" },
+                    ),
+                ],
+            );
             app.manage(DesktopStartupStatus {
                 local_store,
                 recovered_in_flight_mutations,

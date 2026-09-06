@@ -146,6 +146,10 @@ impl DeviceRegistration {
 pub struct SyncClient {
     base_url: String,
     http: reqwest::blocking::Client,
+    /// M4: correlation ID attached to every authenticated request until
+    /// cleared. The sync engine sets it once per cycle so all of a cycle's
+    /// HTTP calls share one server-side correlation trail.
+    correlation_id: std::sync::Mutex<Option<String>>,
 }
 
 impl SyncClient {
@@ -158,11 +162,36 @@ impl SyncClient {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             http,
+            correlation_id: std::sync::Mutex::new(None),
         })
     }
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Sets (or clears with `None`) the correlation ID attached to every
+    /// authenticated request until the next call. The value is capped and
+    /// treated as opaque; only the header line ever carries it.
+    pub fn set_correlation_id(&self, value: Option<&str>) {
+        let mut guard = self
+            .correlation_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = value.map(|value| value.chars().take(128).collect());
+    }
+
+    fn correlation_header(&self) -> Option<(reqwest::header::HeaderName, String)> {
+        let guard = self
+            .correlation_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.clone().map(|value| {
+            (
+                reqwest::header::HeaderName::from_static("x-request-id"),
+                value,
+            )
+        })
     }
 
     /// Authenticate with username/password and persist the refresh secret in
@@ -248,13 +277,15 @@ impl SyncClient {
         access_token: &str,
         registration: &DeviceRegistrationRequest,
     ) -> Result<DeviceRegistration, SyncClientError> {
-        let response = self
+        let mut request = self
             .http
             .post(format!("{}/api/v1/devices/register", self.base_url))
             .bearer_auth(access_token)
-            .json(registration)
-            .send()
-            .map_err(map_transport)?;
+            .json(registration);
+        if let Some((name, value)) = self.correlation_header() {
+            request = request.header(name, value);
+        }
+        let response = request.send().map_err(map_transport)?;
         deserialize_or_classify(response)
     }
 
@@ -266,13 +297,15 @@ impl SyncClient {
         body: &S,
     ) -> Result<T, SyncClientError> {
         let token = self.ensure_access_token()?;
-        let response = self
+        let mut request = self
             .http
             .post(format!("{}{}", self.base_url, path))
             .bearer_auth(token)
-            .json(body)
-            .send()
-            .map_err(map_transport)?;
+            .json(body);
+        if let Some((name, value)) = self.correlation_header() {
+            request = request.header(name, value);
+        }
+        let response = request.send().map_err(map_transport)?;
         deserialize_or_classify(response)
     }
 
@@ -284,25 +317,29 @@ impl SyncClient {
         query: &[(String, String)],
     ) -> Result<T, SyncClientError> {
         let token = self.ensure_access_token()?;
-        let response = self
+        let mut request = self
             .http
             .get(format!("{}{}", self.base_url, path))
             .bearer_auth(token)
-            .query(&query)
-            .send()
-            .map_err(map_transport)?;
+            .query(&query);
+        if let Some((name, value)) = self.correlation_header() {
+            request = request.header(name, value);
+        }
+        let response = request.send().map_err(map_transport)?;
         deserialize_or_classify(response)
     }
 
     /// GET raw octet-stream bytes with bearer auth (verified blob download).
     pub(super) fn get_octet_stream(&self, path: &str) -> Result<Vec<u8>, SyncClientError> {
         let token = self.ensure_access_token()?;
-        let response = self
+        let mut request = self
             .http
             .get(format!("{}{}", self.base_url, path))
-            .bearer_auth(token)
-            .send()
-            .map_err(map_transport)?;
+            .bearer_auth(token);
+        if let Some((name, value)) = self.correlation_header() {
+            request = request.header(name, value);
+        }
+        let response = request.send().map_err(map_transport)?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             let code = response
@@ -320,14 +357,16 @@ impl SyncClient {
     /// PUT raw octet-stream bytes with bearer auth (verified blob upload).
     pub(super) fn put_octet_stream(&self, path: &str, bytes: &[u8]) -> Result<(), SyncClientError> {
         let token = self.ensure_access_token()?;
-        let response = self
+        let mut request = self
             .http
             .put(format!("{}{}", self.base_url, path))
             .bearer_auth(token)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(bytes.to_vec())
-            .send()
-            .map_err(map_transport)?;
+            .body(bytes.to_vec());
+        if let Some((name, value)) = self.correlation_header() {
+            request = request.header(name, value);
+        }
+        let response = request.send().map_err(map_transport)?;
         let status = response.status().as_u16();
         if response.status().is_success() {
             return Ok(());
@@ -490,5 +529,36 @@ mod tests {
         let (name, value) = pair.split_once('=').expect("cookie name/value");
         assert_eq!(name.trim(), REFRESH_COOKIE_NAME);
         assert_eq!(value.trim(), "rotated-token");
+    }
+
+    #[test]
+    fn correlation_id_set_clear_and_cap() {
+        let client = SyncClient::new("http://127.0.0.1:1").expect("client");
+        client.set_correlation_id(Some("cycle-abc"));
+        {
+            let guard = client
+                .correlation_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(guard.as_deref(), Some("cycle-abc"));
+        }
+        client.set_correlation_id(None);
+        {
+            let guard = client
+                .correlation_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(guard.is_none());
+        }
+        // Overlong IDs are capped (128) so a hostile local value cannot
+        // bloat server log lines.
+        client.set_correlation_id(Some(&"x".repeat(500)));
+        {
+            let guard = client
+                .correlation_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(guard.as_ref().map(String::len), Some(128));
+        }
     }
 }

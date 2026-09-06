@@ -26,10 +26,11 @@
 //! touching mutation state; transport failures persist per-mutation
 //! backoff through the durable ACK transaction.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::blob_store::BlobStore;
 use crate::local_store::{
@@ -39,6 +40,7 @@ use crate::sync_client::{DeviceRegistrationRequest, SyncClient, SyncClientError}
 use crate::sync_pull::{pull_changes, PullError};
 use crate::sync_push::MutationMetadata;
 use crate::sync_transport::NegotiationError;
+use crate::telemetry;
 
 /// Upper bound on mutations dispatched per cycle; the rest wait for the
 /// next trigger. Prevents one huge backlog from monopolizing the worker
@@ -139,6 +141,63 @@ impl SyncEngine {
         blobs: &BlobStore,
         device_display_name: &str,
     ) -> Result<SyncCycleReport, SyncCycleError> {
+        // M4: one correlation ID per cycle, sent as X-Request-ID on every
+        // HTTP call this cycle makes so a client-reported failure maps to
+        // the exact server-side request lines.
+        let cycle_id = Uuid::new_v4().to_string();
+        client.set_correlation_id(Some(&cycle_id));
+        let started = Instant::now();
+        telemetry::event(
+            "sync_cycle_begin",
+            &[
+                ("cycle_id", &cycle_id),
+                (
+                    "outbox_pending",
+                    &store
+                        .health()
+                        .map(|h| h.pending_mutations.to_string())
+                        .unwrap_or_else(|_| "?".to_owned()),
+                ),
+            ],
+        );
+        let result = self.run_cycle_inner(client, store, blobs, device_display_name, &cycle_id);
+        match &result {
+            Ok(report) => telemetry::event(
+                "sync_cycle_end",
+                &[
+                    ("cycle_id", &cycle_id),
+                    ("outcome", "ok"),
+                    ("pushed", &report.pushed.to_string()),
+                    ("pages_applied", &report.pages_applied.to_string()),
+                    ("upserts", &report.upserts.to_string()),
+                    ("tombstones", &report.tombstones.to_string()),
+                    ("conflicts", &report.conflicts_detected.to_string()),
+                    ("blobs_downloaded", &report.blobs_downloaded.to_string()),
+                    ("duration_ms", &started.elapsed().as_millis().to_string()),
+                ],
+            ),
+            Err(error) => telemetry::event(
+                "sync_cycle_end",
+                &[
+                    ("cycle_id", &cycle_id),
+                    ("outcome", "error"),
+                    ("error", &failure_message(error)),
+                    ("duration_ms", &started.elapsed().as_millis().to_string()),
+                ],
+            ),
+        }
+        client.set_correlation_id(None);
+        result
+    }
+
+    fn run_cycle_inner(
+        &self,
+        client: &SyncClient,
+        store: &LocalStore,
+        blobs: &BlobStore,
+        device_display_name: &str,
+        cycle_id: &str,
+    ) -> Result<SyncCycleReport, SyncCycleError> {
         // 1. Session: refresh before anything else so every later call can
         // reuse the fresh access token. A missing refresh credential means
         // the user never signed in — stop quietly.
@@ -193,6 +252,17 @@ impl SyncEngine {
             match dispatch_mutation(client, store, blobs, &mutation) {
                 Ok(()) => pushed += 1,
                 Err(error) => {
+                    // M4: mutation-lifecycle diagnostics — outcome class and
+                    // error code only, never payloads.
+                    telemetry::event(
+                        "mutation_dispatch_failed",
+                        &[
+                            ("cycle_id", cycle_id),
+                            ("mutation_id", &mutation.id),
+                            ("operation", mutation.operation.as_db_str()),
+                            ("error", &failure_message(&error)),
+                        ],
+                    );
                     push_failure = Some(error);
                     break;
                 }
@@ -218,7 +288,16 @@ impl SyncEngine {
         // M3: apply offline-policy expiry after each pull so a lease that
         // ran out mid-session is reconciled without waiting for a restart.
         let expired_entitlements = store.expire_due_entitlements(Utc::now())?;
-        let _ = expired_entitlements;
+        if !expired_entitlements.is_empty() {
+            // M3/M4: entitlement reconciliation diagnostics — skill IDs only.
+            telemetry::event(
+                "entitlements_expired",
+                &[
+                    ("cycle_id", cycle_id),
+                    ("skills", &expired_entitlements.join(",")),
+                ],
+            );
+        }
 
         Ok(SyncCycleReport {
             pushed,

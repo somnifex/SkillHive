@@ -42,24 +42,22 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 | M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration deferred until a consumer needs it |
 | M2.6 Desktop sync orchestrator (#11) | CODE COMPLETE (desktop) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake landed (`sync_worker.rs`) and validated live |
 | M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (desktop) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side AND live client-process scenarios validated 2026-09-06 (see validation truth)** |
-| M3 Enterprise offline authorization | CODE COMPLETE (server + desktop) — grant offline policy (migration `c4d5e6f7a8b9`), signed JWT entitlement leases shipped in pull metadata, desktop schema-v4 entitlement store, pull-apply + startup + post-pull reconciliation landed (`b2165a7`, `b5be325`, `97fe35e`, `bef5977`); **unit-level validated only — live CDP run still pending** |
+| M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED — grant offline policy (migration `c4d5e6f7a8b9`), signed JWT entitlement leases shipped in pull metadata, desktop schema-v4 entitlement store, pull-apply + startup + post-pull reconciliation landed (`b2165a7`, `b5be325`, `97fe35e`, `bef5977`); **live CDP scenarios validated 2026-09-07 (see validation truth)** |
 | M4 Production hardening | PLANNED |
 
 ## Exact next task
 
-Continue on branch `feat/m2-continue`. M2 desktop work packages remain code
-complete (see gaps below). M3 is now code complete on both sides; the next
-M3 task is **live validation through the CDP harness**: admin grants a
-managed global skill to a group (with each offline policy), the member
-desktop pulls the lease, then revoke/expiry scenarios reconcile
-(`access_revoked` + deployment `revoked`). After that, M4 (production
-hardening) is the next milestone.
-
-Remaining M2 gaps (record-only):
+Continue on branch `feat/m2-continue`. M3 is now code complete AND
+live-validated (see validation truth below). The next milestone is **M4
+(production hardening)**: structured logs/correlation IDs, metrics,
+migration backup/safe startup, fault-injection tests, signed release
+process. Remaining M2 gaps stay record-only:
 
 1. **Workspaces/hydration polish (M2.5 leftover)** — pulled `remote_only`
    records carry metadata + manifest only; workspace hydration (materialize
-   files from the blob closure) is deferred until a consumer needs it.
+   files from the blob closure) is deferred until a consumer needs it. This
+   also blocks deploying a pulled managed skill (manifest format mismatch —
+   recorded in the M3 validation run).
 2. **M2.2 destructive GC sweep** — design doc landed; implementation
    deliberately deferred.
 3. **UI-side local-skill surface** — the WebView pages still use the legacy
@@ -108,8 +106,51 @@ Validation truth: backend `uv run python -m pytest backend/tests` →
 106 passed (includes 8 entitlement-lease tests); `uv run mypy backend/app`
 strict → clean; `cargo test --lib` → 91 passed (6 entitlement + 3
 pull-apply entitlement tests); `cargo clippy -D warnings` and
-`cargo fmt --check` → clean. **Not yet live-validated**: the revoke/expiry
-scenarios through the desktop CDP harness (see "Exact next task").
+`cargo fmt --check` → clean.
+
+### Validated 2026-09-07 (live desktop M3 entitlement leases, CDP harness)
+
+Toolchain: fresh E2E server DB (Alembic → `c4d5e6f7a8b9`, seeded dev data,
+`tmp/e2e-server/`), Vite dev server, debug `skillhive-desktop.exe` with
+WebView2 CDP (schema v4 created on the running desktop). Admin granted the
+seeded global skill 需求澄清助手 to a group; member `howie` logged in via the
+real client process. `sync_now` pulled the change feed and the desktop:
+
+- schema upgraded to v4 (`local_entitlements` created); the pulled upsert
+  landed with `metadata.entitlement` carrying the signed JWT lease, policy
+  `ttl`/8h, and server-signed `issued_at`/`expires_at` — OK;
+- **ttl lease honoured**: desktop stored the lease verbatim; skill usable
+  (`remote_only` → deploy attempt correctly refused by state gate, not by
+  the lease) — OK;
+- **grant revoke → lease re-issue cycle**: with all grants revoked, the
+  pull no longer ships a lease; backdating the stored lease (simulated
+  expiry) + `sync_now` → post-pull sweep flipped the skill
+  `access_revoked` — OK;
+- **expired lease gates deployment**: deploy attempt in `AccessRevoked`
+  state → rejected (`not deployable in state AccessRevoked`) — OK;
+- **deployment revocation reconciliation**: seeded an `installed`
+  deployment, expired the lease, `sync_now` → skill `access_revoked` AND
+  deployment → `revoked` with `last_error` "entitlement expired;
+  deployment revoked by offline policy" — OK;
+- **re-entitlement**: fresh grants + new feed event → fresh lease cleared
+  the expired-lease revocation (skill back to `synced`, new expiry stamped)
+  — OK (validated twice, including after the disabled-policy cycle);
+- **disabled policy (restricted, zero offline window)**: grants set to
+  `disabled` → pulled lease expires at issuance (exp == issued) and the
+  post-pull sweep immediately revoked the skill — OK;
+- **server-side write gate (exit criterion)**: a non-owner update mutation
+  against the managed global skill → protocol `permission_denied`
+  (`SKILL_NOT_FOUND`) with a durable receipt — OK;
+- **startup surface**: `desktop_startup_status` exposes
+  `expiredEntitlements`; `sync_state` stayed clean (`last_server_error`
+  null) through all cycles — OK.
+
+Not covered live: deploying a pulled managed skill end-to-end fails on the
+pre-existing M2.5 workspace-hydration gap (server-synthesized legacy
+manifest lacks desktop `blob_hash` fields) — recorded as the known M2.5
+gap, not an M3 defect; `unlimited` policy lease was observed shipping
+(expiry = issued + 7d) before the grants were switched to `ttl`, but the
+full 7-day expiry was not awaited (policy math is unit-tested).
 
 Legacy package synthesis (plan §17 / handoff §9.6) is **landed** (commit
 `b0914e5`) and **live-validated through the desktop CDP harness**

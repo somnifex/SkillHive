@@ -95,7 +95,10 @@ def test_ttl_policy_uses_grant_hours(lease_session: Session) -> None:
     grant, skill = _seed_grant(
         lease_session, offline_policy="ttl", offline_ttl_hours=8
     )
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    # Anchor at the real wall clock: a fixed past timestamp makes the signed
+    # token expire (exp = anchor + 8h) before the decode assertion runs, and
+    # the JWT layer rejects it as expired rather than testing policy math.
+    now = datetime.now(UTC)
     assert lease_expiry(grant, now=now) == now + timedelta(hours=8)
 
     token, lease = issue_entitlement_lease(grant, skill, now=now)
@@ -109,7 +112,10 @@ def test_ttl_policy_uses_grant_hours(lease_session: Session) -> None:
 
 def test_unlimited_policy_gets_refresh_bound_not_infinity(lease_session: Session) -> None:
     grant, skill = _seed_grant(lease_session)
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    # Anchor at the real wall clock (same reason as the ttl test above): the
+    # 7-day refresh bound keeps the token valid here, but a fixed past date
+    # would eventually make decode reject it as expired.
+    now = datetime.now(UTC)
     expires = lease_expiry(grant, now=now)
     assert expires == now + timedelta(hours=LEASE_UNLIMITED_TTL_HOURS)
     token, _lease = issue_entitlement_lease(grant, skill, now=now)

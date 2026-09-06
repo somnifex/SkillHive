@@ -87,12 +87,14 @@ Do not interpret these files as verified merely because PR #3 was merged.
 
 Toolchain: backend `uvicorn` 127.0.0.1:8000 on SQLite (`tmp/e2e-server/`), Vite dev server, debug `skillhive-desktop.exe` with WebView2 CDP debugging (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`). The WebView was driven through the Chrome DevTools Protocol (`Runtime.evaluate` → `window['__TAURI__']['core'].invoke(...)`) so every scenario runs the app's real Rust command path and real runtime state (`%LOCALAPPDATA%/app.skillhive.desktop`), not a test double.
 
-**Four real desktop bugs found and fixed by this run:**
+**Six real bugs found and fixed by this run:**
 
 - `54e341f` — `state not managed` on every command: setup managed `Arc<LocalStore>` while commands expect `LocalStore` (Tauri resolves by exact TypeId, no auto-deref). Fixed by managing plain values and giving the sync worker its own handles to the same SQLite/blob paths (safe: WAL + busy_timeout, content-addressed idempotent blob writes).
 - `54e341f` — pull upsert crashed with `UNIQUE constraint failed: local_skills.remote_id`: a pushed create stores the server ID only in `remote_id` under the client-generated local key, so the feed echo must resolve by `id OR remote_id` and merge (`apply_upsert`/`apply_tombstone`), inserting under the local key when absent. Unit tests added.
 - `506a8a2` — every follow-up update got 422 `VALIDATION_ERROR` ("update mutation requires remoteSkillId"): `submit_mutation` read the remote ID only from the mutation row's `acknowledged_remote_id` (NULL for updates); now falls back to the skill's `remote_id`.
 - `4c66ec3` — conflict never converged: `apply_definitive_error` never persisted the server's `conflict_head_revision` onto the skill row, so keep-local re-queued against a stale base and re-conflicted forever. Now `remote_revision = COALESCE(?3, remote_revision)`; validated live through full convergence.
+- `f63e918` (server) — sync-created skills carried only `content.skill_markdown`, so the existing web UI's editor/preview saw an empty body (plan §17 requires sync writes to populate enough legacy content); sync writes now mirror the entrypoint into `instructions` as well, with a UI-side `skill_markdown` fallback.
+- `02cdd8e` (desktop) — an offline outbox chain's own change-feed echo, pulled mid-chain, labeled the Skill `conflict`; no transition ever cleared that label, wedging the row after every mutation acked. `apply_acked` now clears a stale `conflict` label only when no unacked mutation remains.
 
 Scenario results (all through the real client process):
 

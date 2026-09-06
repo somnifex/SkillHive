@@ -93,6 +93,16 @@ impl LocalStore {
 /// Upserts pulled metadata. Local dirty work never gets silently
 /// overwritten: a remote change under a dirty/conflict head marks the
 /// resource `conflict` instead.
+///
+/// Identity: a local row for a pushed-but-created Skill carries a
+/// client-generated primary key with the server ID in `remote_id`
+/// (UNIQUE). When the server echoes that Skill back through the change
+/// feed, `resource_id` IS the server ID, so the upsert must first match
+/// on `remote_id` and adopt that row's primary key — inserting a second
+/// row keyed by the server ID would collide with the UNIQUE constraint
+/// and roll back the whole page. The merge keeps the local key (outbox
+/// chain, deployments and workspaces reference it) and refreshes the
+/// remote identity columns.
 fn apply_upsert(
     transaction: &rusqlite::Transaction<'_>,
     change: &ChangeItem,
@@ -101,13 +111,16 @@ fn apply_upsert(
     let slug = metadata_string(change, "slug");
     let workspace_path = format!("{}\\{}", std::env::temp_dir().display(), change.resource_id);
 
-    let existing_state: Option<String> = transaction
+    let existing: Option<(String, String)> = transaction
         .query_row(
-            "SELECT sync_state FROM local_skills WHERE id = ?1",
+            "SELECT id, sync_state FROM local_skills WHERE id = ?1 OR remote_id = ?1",
             params![change.resource_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
+    let (local_key, existing_state) = existing
+        .map(|(id, state)| (Some(id), Some(state)))
+        .unwrap_or((None, None));
 
     let conflict = matches!(
         existing_state.as_deref(),
@@ -131,6 +144,7 @@ fn apply_upsert(
         ) VALUES (?1, ?1, COALESCE(?2, ?1), COALESCE(?3, ?1), ?4, COALESCE(?5, ''),
                   ?6, ?7, 0, CURRENT_TIMESTAMP)
         ON CONFLICT(id) DO UPDATE SET
+            remote_id = COALESCE(local_skills.remote_id, excluded.remote_id),
             remote_revision = ?6,
             current_blob_hash = COALESCE(?5, local_skills.current_blob_hash),
             name = COALESCE(?2, local_skills.name),
@@ -139,7 +153,7 @@ fn apply_upsert(
             updated_at = CURRENT_TIMESTAMP
         "#,
         params![
-            change.resource_id,
+            local_key.as_deref().unwrap_or(change.resource_id.as_str()),
             name,
             slug,
             workspace_path,
@@ -159,10 +173,26 @@ fn apply_tombstone(
     transaction: &rusqlite::Transaction<'_>,
     change: &ChangeItem,
 ) -> Result<(), LocalStoreError> {
+    // The local row may be keyed by the client-generated ID (a pushed
+    // create carries the server ID only in `remote_id`), so resolve the
+    // key the same way apply_upsert does.
+    let local_key: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM local_skills WHERE id = ?1 OR remote_id = ?1",
+            params![change.resource_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let Some(local_key) = local_key else {
+        // Unknown resource: nothing cached, nothing to remove.
+        return Ok(());
+    };
+
     let dirty: bool = transaction
         .query_row(
             "SELECT COUNT(*) FROM local_mutations WHERE skill_id = ?1 AND state != 'acked'",
-            params![change.resource_id],
+            params![local_key],
             |row| row.get::<_, i64>(0),
         )
         .map(|count| count > 0)?;
@@ -174,15 +204,12 @@ fn apply_tombstone(
             SET remote_revision = ?2, sync_state = 'conflict', updated_at = CURRENT_TIMESTAMP
             WHERE id = ?1
             "#,
-            params![change.resource_id, change.resource_revision],
+            params![local_key, change.resource_revision],
         )?;
         return Ok(());
     }
 
-    transaction.execute(
-        "DELETE FROM local_skills WHERE id = ?1",
-        params![change.resource_id],
-    )?;
+    transaction.execute("DELETE FROM local_skills WHERE id = ?1", params![local_key])?;
     Ok(())
 }
 
@@ -196,7 +223,7 @@ fn metadata_string(change: &ChangeItem, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::SkillSyncState;
+    use super::super::{CommitSkillEdit, MutationOperation, SkillSyncState};
     use super::*;
     use serde_json::json;
 
@@ -332,5 +359,95 @@ mod tests {
         let skill = store.get_skill("remote-5").expect("read").expect("skill");
         assert_eq!(skill.sync_state, SkillSyncState::Conflict);
         assert_eq!(skill.remote_revision, Some(5));
+    }
+
+    #[test]
+    fn pulled_upsert_merges_into_locally_keyed_row_by_remote_id() {
+        // The push path keys the local row by a client-generated ID and
+        // stores the server ID only in `remote_id` (UNIQUE). When the feed
+        // echoes the same resource, the upsert must merge into that row
+        // instead of inserting a second one keyed by the server ID.
+        let (_temp, store) = open_temp_store();
+        let mutation = store
+            .commit_skill_edit(CommitSkillEdit {
+                skill_id: "local-key-1".to_owned(),
+                remote_id: None,
+                name: "Local First".to_owned(),
+                slug: "local-first".to_owned(),
+                workspace_path: std::env::temp_dir().join("skillhive-merge"),
+                blob_hash: "sha256:local".to_owned(),
+                base_revision: None,
+                operation: MutationOperation::Create,
+            })
+            .expect("commit");
+        {
+            let connection = store.lock_connection().expect("conn");
+            connection
+                .execute(
+                    "UPDATE local_mutations SET state = 'acked' WHERE id = ?1",
+                    [mutation.id.as_str()],
+                )
+                .expect("ack");
+            connection
+                .execute(
+                    "UPDATE local_skills SET remote_id = 'srv-9', remote_revision = 1, \
+                     sync_state = 'synced' WHERE id = 'local-key-1'",
+                    [],
+                )
+                .expect("attach remote id");
+        }
+
+        let applied = store
+            .apply_changes_page(&page(vec![upsert("srv-9", 2)], "v1.AAAAQg"))
+            .expect("apply");
+
+        assert_eq!(applied.upserts, 1);
+        // Same local key, refreshed remote identity; no second row.
+        let skill = store
+            .get_skill("local-key-1")
+            .expect("read")
+            .expect("skill");
+        assert_eq!(skill.remote_id.as_deref(), Some("srv-9"));
+        assert_eq!(skill.remote_revision, Some(2));
+        assert_eq!(skill.sync_state, SkillSyncState::Synced);
+        assert!(store.get_skill("srv-9").expect("read").is_none());
+    }
+
+    #[test]
+    fn pulled_tombstone_removes_locally_keyed_row_by_remote_id() {
+        let (_temp, store) = open_temp_store();
+        let mutation = store
+            .commit_skill_edit(CommitSkillEdit {
+                skill_id: "local-key-2".to_owned(),
+                remote_id: None,
+                name: "Local Second".to_owned(),
+                slug: "local-second".to_owned(),
+                workspace_path: std::env::temp_dir().join("skillhive-tombstone"),
+                blob_hash: "sha256:local2".to_owned(),
+                base_revision: None,
+                operation: MutationOperation::Create,
+            })
+            .expect("commit");
+        {
+            let connection = store.lock_connection().expect("conn");
+            connection
+                .execute(
+                    "UPDATE local_mutations SET state = 'acked' WHERE id = ?1",
+                    [mutation.id.as_str()],
+                )
+                .expect("ack");
+            connection
+                .execute(
+                    "UPDATE local_skills SET remote_id = 'srv-10', remote_revision = 1, \
+                     sync_state = 'synced' WHERE id = 'local-key-2'",
+                    [],
+                )
+                .expect("attach remote id");
+        }
+
+        store
+            .apply_changes_page(&page(vec![tombstone("srv-10", 2)], "v1.AAAAQg"))
+            .expect("delete");
+        assert!(store.get_skill("local-key-2").expect("read").is_none());
     }
 }

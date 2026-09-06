@@ -842,29 +842,45 @@ pub fn run() {
 
             // Background sync triggers (plan §13): startup cycle, a slow
             // heartbeat, and pokes from local commits / explicit requests.
-            // Correctness stays in SQLite; the worker holds no state. The
-            // managed state itself is shared behind Arcs the worker keeps.
-            let shared_store = Arc::new(store);
-            let shared_blobs = Arc::new(blobs);
-            let shared_client = Arc::new(SyncClient::new(
+            // Correctness stays in SQLite; the worker holds no state.
+            //
+            // The worker thread outlives the setup closure, so it cannot
+            // borrow the managed values directly. The worker only needs
+            // the same *state* (SQLite DB, blob root, credential store),
+            // not the same object: LocalStore/BlobStore opening a second
+            // handle to the same paths is safe (SQLite WAL + busy_timeout,
+            // content-addressed idempotent blob writes), so the worker
+            // opens its own handles to the same directories.
+            let worker_store = match LocalStore::open(data_dir.join("skillhive.sqlite3")) {
+                Ok(worker_store) => worker_store,
+                Err(error) => return Err(error.into()),
+            };
+            let worker_blobs = match BlobStore::open(data_dir.join("blobs")) {
+                Ok(worker_blobs) => worker_blobs,
+                Err(error) => return Err(error.into()),
+            };
+            let worker_client = SyncClient::new(
                 &std::env::var("SKILLHIVE_SERVER_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
-            )?);
+            )?;
             let sync_handle = spawn_sync_worker(
-                Arc::clone(&shared_client),
-                Arc::clone(&shared_store),
-                Arc::clone(&shared_blobs),
+                Arc::new(worker_client),
+                Arc::new(worker_store),
+                Arc::new(worker_blobs),
                 "SkillHive Desktop",
             );
 
-            app.manage(shared_store);
-            app.manage(shared_blobs);
+            app.manage(store);
+            app.manage(blobs);
+            app.manage(SyncClient::new(
+                &std::env::var("SKILLHIVE_SERVER_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
+            )?);
             app.manage(workspaces);
             app.manage(deployment);
             app.manage(uninstall);
             app.manage(registry);
             app.manage(DesktopMutationCoordinator::default());
-            app.manage(shared_client);
             app.manage(sync_handle);
             app.manage(DesktopStartupStatus {
                 local_store,

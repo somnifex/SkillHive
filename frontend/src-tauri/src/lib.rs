@@ -34,7 +34,7 @@ use skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotPolicy};
 use snapshot_verifier::verify_materialized_snapshot;
 use sync::{SyncCycleReport, SyncEngine};
 use sync_client::{DeviceRegistrationRequest, SyncClient};
-use sync_worker::spawn_sync_worker;
+use sync_worker::{spawn_sync_worker, SyncWorkerHandle};
 use tauri::Manager;
 use uninstall::{UninstallEngine, UninstallRequest};
 use workspace::{WorkspaceRef, WorkspaceStore};
@@ -219,6 +219,7 @@ fn commit_local_skill_workspace(
     store: tauri::State<'_, LocalStore>,
     blobs: tauri::State<'_, BlobStore>,
     workspaces: tauri::State<'_, WorkspaceStore>,
+    sync_worker: tauri::State<'_, SyncWorkerHandle>,
     request: CommitLocalSkillWorkspaceRequest,
 ) -> Result<CommitLocalSkillWorkspaceResult, String> {
     let _guard = coordinator
@@ -254,6 +255,10 @@ fn commit_local_skill_workspace(
         .get_skill(&request.skill_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("skill disappeared after local commit: {}", request.skill_id))?;
+
+    // Local work landed — trigger the background worker so it starts
+    // flowing to the server without waiting for the heartbeat.
+    sync_worker.request_sync();
 
     let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
     Ok(CommitLocalSkillWorkspaceResult {

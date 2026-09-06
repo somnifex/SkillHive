@@ -87,6 +87,29 @@ Do not interpret these files as verified merely because PR #3 was merged.
 
 ## Validation truth
 
+### Validated 2026-09-06 (live end-to-end sync protocol run, Windows 11 Pro 10.0.26200)
+
+Toolchain: Python 3.12 (uv venv) backend on `uvicorn` 127.0.0.1:8000, SQLite `data/skillhive.db` migrated fresh → `b6a31d0f4c9e`.
+
+Scenario results (HTTP exercised with curl/urllib exactly as the desktop client would call):
+
+- login → access token + HttpOnly `skillhive_refresh` cookie (path `/api/v1/auth`) — OK;
+- refresh rotates the cookie and revokes the prior refresh session (second use → 401) — OK;
+- device registration idempotent per `(user, clientInstanceId)` — OK;
+- blob negotiation → PUT both objects (204) → create mutation → `acked` with remote ID/revision — OK;
+- **same mutation replayed → identical receipt response, single server effect — OK**;
+- two devices updating the same base revision → first `acked`, second `conflict` carrying the remote head — OK;
+- stale `delete` against an old base revision → `conflict` (server head preserved) — OK;
+- revoked device mutation → rejected (401-class device failure, outbox semantics separate) — OK;
+- re-registration of a revoked client instance refused — OK;
+- pull feed: pagination stable/ordered/disjoint across pages, tombstone after REST delete — OK;
+- malformed cursor → 400 `SYNC_CURSOR_INVALID` — OK;
+- private content filtered from an unrelated user's pull (empty feed) and direct read → 404 — OK;
+- corrupt blob upload (digest mismatch) → 400; size-mismatch upload → 400; correct upload + roundtrip download byte-identical; missing blob → 404 — OK;
+- final change feed: 5 events (browser create, desktop create, update, tombstone, second-device update) — OK.
+
+Not covered live (unit-level coverage exists in `cargo test`/`pytest`): client-side SQLite apply paths (`apply_changes_page`, `apply_mutation_outcome`, conflict resolution) — those are covered by 75 desktop unit tests but not yet against this live server from the actual Tauri process.
+
 ### Validated 2026-09-05 (local agent session, Windows 11 Pro 10.0.26200)
 
 Toolchain: Python 3.12.0 (uv-managed venv) · Node v24.14.1 · pnpm 11.9.0 · rustc/cargo 1.94.1

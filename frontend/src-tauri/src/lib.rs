@@ -60,6 +60,9 @@ pub struct DesktopStartupStatus {
     pub deployment_recovery: RecoveryReport,
     pub uninstall_recovery: UninstallStartupReport,
     pub agent_reconciliation_errors: Vec<String>,
+    /// Skill IDs whose M3 entitlements expired while the app was closed and
+    /// were reconciled to `access_revoked` at startup (offline policy).
+    pub expired_entitlements: Vec<String>,
     pub cache_enforcement: Option<CacheEnforcementReport>,
     pub cache_error: Option<String>,
 }
@@ -769,6 +772,10 @@ pub fn run() {
             let data_dir = app.path().app_local_data_dir()?;
             let store = LocalStore::open(data_dir.join("skillhive.sqlite3"))?;
             let recovered_in_flight_mutations = store.recover_in_flight_mutations()?;
+            // M3 offline-policy reconciliation: expire any entitlement whose
+            // deadline passed while the app was closed, before the caches and
+            // agent reconciliation can act on now-stale content.
+            let expired_entitlements = store.expire_due_entitlements(chrono::Utc::now())?;
             let blobs = BlobStore::open(data_dir.join("blobs"))?;
             let workspaces = WorkspaceStore::open(data_dir.join("workspaces"))?;
             let deployment = DeploymentEngine::open(data_dir.join("deployment-journal"))?;
@@ -888,6 +895,7 @@ pub fn run() {
                 deployment_recovery,
                 uninstall_recovery,
                 agent_reconciliation_errors,
+                expired_entitlements,
                 cache_enforcement,
                 cache_error,
             });

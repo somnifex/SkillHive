@@ -1,6 +1,7 @@
 mod cache;
 mod conflicts;
 mod deployments;
+mod entitlements;
 mod migrations;
 mod mutations;
 mod outcomes;
@@ -11,6 +12,7 @@ mod uninstall;
 
 pub use cache::{CacheSkillRecord, LocalCachePolicy};
 pub use conflicts::{ConflictRecord, ResolutionApplied};
+pub use entitlements::{entitlement_allows_offline_use, EntitlementPayload, StoredEntitlement};
 pub use outcomes::{MutationOutcome, OutcomeApplied};
 pub use pull_apply::{ChangeItem, ChangesPage, PageApplied};
 

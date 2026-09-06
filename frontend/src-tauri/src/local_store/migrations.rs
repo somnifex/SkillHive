@@ -2,7 +2,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use super::LocalStoreError;
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 3;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 4;
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -189,6 +189,25 @@ const MIGRATIONS: &[(i64, &str)] = &[
 
         INSERT INTO local_sync_state(id, protocol_version)
         VALUES (1, 1);
+        "#,
+    ),
+    (
+        4,
+        r#"
+        CREATE TABLE local_entitlements (
+            skill_id TEXT PRIMARY KEY NOT NULL,
+            lease TEXT NOT NULL,
+            permission_level TEXT NOT NULL,
+            offline_policy TEXT NOT NULL CHECK (offline_policy IN ('unlimited', 'ttl', 'disabled')),
+            offline_ttl_hours INTEGER CHECK (offline_ttl_hours IS NULL OR offline_ttl_hours >= 1),
+            issued_at TEXT,
+            expires_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(skill_id) REFERENCES local_skills(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX idx_local_entitlements_expires
+            ON local_entitlements(expires_at);
         "#,
     ),
 ];

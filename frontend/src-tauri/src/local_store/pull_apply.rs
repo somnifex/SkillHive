@@ -9,6 +9,7 @@
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Deserialize;
 
+use super::entitlements::EntitlementPayload;
 use super::{LocalStore, LocalStoreError};
 
 /// One decoded `SyncChangeItem` from the pull feed (camelCase on the wire).
@@ -44,6 +45,7 @@ pub struct PageApplied {
     pub upserts: usize,
     pub tombstones: usize,
     pub conflicts_detected: u64,
+    pub entitlements: usize,
 }
 
 impl LocalStore {
@@ -62,6 +64,7 @@ impl LocalStore {
         let mut upserts = 0_usize;
         let mut tombstones = 0_usize;
         let mut conflicts = 0_u64;
+        let mut entitlements = 0_usize;
 
         for change in &page.changes {
             if change.operation == "delete" {
@@ -71,6 +74,7 @@ impl LocalStore {
                 conflicts += apply_upsert(&transaction, change)?;
                 upserts += 1;
             }
+            entitlements += apply_change_entitlement(self, &transaction, change)?;
         }
 
         // Cursor advance is part of the same transaction: an interrupted
@@ -82,6 +86,7 @@ impl LocalStore {
             upserts,
             tombstones,
             conflicts_detected: conflicts,
+            entitlements,
         })
     }
 
@@ -221,8 +226,54 @@ fn metadata_string(change: &ChangeItem, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Applies a shipped entitlement lease (M3) inside the same page
+/// transaction. Tombstones carry no lease; an upsert's `metadata.entitlement`
+/// is optional (personal skills ship none). A malformed lease payload fails
+/// the whole page so the cursor never advances past a lease the desktop
+/// could not interpret (fail closed).
+fn apply_change_entitlement(
+    store: &LocalStore,
+    transaction: &rusqlite::Transaction<'_>,
+    change: &ChangeItem,
+) -> Result<usize, LocalStoreError> {
+    if change.operation == "delete" {
+        return Ok(0);
+    }
+    let Some(entitlement_json) = change.metadata.get("entitlement") else {
+        return Ok(0);
+    };
+    if entitlement_json.is_null() {
+        return Ok(0);
+    }
+    let payload: EntitlementPayload =
+        serde_json::from_value(entitlement_json.clone()).map_err(|error| {
+            LocalStoreError::InvalidPersistedState(format!(
+                "change {} carries a malformed entitlement: {error}",
+                change.resource_id
+            ))
+        })?;
+    // The lease binds the server ID; resolve the local key the same way the
+    // upsert did so the entitlement lands on the row the outbox chains to.
+    let local_key: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM local_skills WHERE id = ?1 OR remote_id = ?1",
+            params![change.resource_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(local_key) = local_key else {
+        // No local row yet: the upsert above always creates one, so this is
+        // unreachable in practice; skipping is still safe because the next
+        // pull re-ships the lease.
+        return Ok(0);
+    };
+    store.apply_entitlement(transaction, &local_key, &payload, chrono::Utc::now())?;
+    Ok(1)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::entitlements::entitlement_allows_offline_use;
     use super::super::{CommitSkillEdit, MutationOperation, SkillSyncState};
     use super::*;
     use serde_json::json;
@@ -449,5 +500,121 @@ mod tests {
             .apply_changes_page(&page(vec![tombstone("srv-10", 2)], "v1.AAAAQg"))
             .expect("delete");
         assert!(store.get_skill("local-key-2").expect("read").is_none());
+    }
+
+    fn entitlement_metadata(issued: &str, expires: &str) -> serde_json::Value {
+        json!({
+            "name": "Managed Pull",
+            "slug": "managed-pull",
+            "entitlement": {
+                "lease": "lease-token",
+                "permission_level": "use",
+                "offline_policy": "ttl",
+                "offline_ttl_hours": 8,
+                "issued_at": issued,
+                "expires_at": expires,
+            },
+        })
+    }
+
+    #[test]
+    fn pulled_entitlement_stores_alongside_content() {
+        let (_temp, store) = open_temp_store();
+        let mut item = upsert("remote-ent-1", 1);
+        item.metadata = entitlement_metadata("2026-09-06T12:00:00Z", "2027-01-01T00:00:00Z");
+
+        let applied = store
+            .apply_changes_page(&page(vec![item], "v1.AAAAAQ"))
+            .expect("apply");
+
+        assert_eq!(applied.entitlements, 1);
+        assert_eq!(applied.upserts, 1);
+        let stored = store
+            .get_entitlement("remote-ent-1")
+            .expect("read")
+            .expect("entitlement row");
+        assert_eq!(stored.offline_policy, "ttl");
+        assert_eq!(stored.offline_ttl_hours, Some(8));
+        // Fresh lease: the skill stays usable.
+        let skill = store
+            .get_skill("remote-ent-1")
+            .expect("read")
+            .expect("skill");
+        assert_eq!(skill.sync_state, SkillSyncState::RemoteOnly);
+    }
+
+    #[test]
+    fn pulled_expired_entitlement_revokes_at_apply() {
+        let (_temp, store) = open_temp_store();
+        let mut item = upsert("remote-ent-2", 1);
+        // A deadline far in the past: the reconciler stamps `now` from the
+        // real wall clock, so the expired lease must revoke the fresh upsert
+        // immediately at apply time.
+        item.metadata = entitlement_metadata("2025-01-01T00:00:00Z", "2025-01-02T00:00:00Z");
+        let applied = {
+            let mut connection = store.lock_connection().expect("conn");
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("tx");
+            let mut applied = PageApplied {
+                upserts: 0,
+                tombstones: 0,
+                conflicts_detected: 0,
+                entitlements: 0,
+            };
+            for change in &page(vec![item], "v1.AAAAAQ").changes {
+                if change.operation == "delete" {
+                    apply_tombstone(&transaction, change).expect("tombstone");
+                } else {
+                    applied.upserts += apply_upsert(&transaction, change).expect("upsert") as usize;
+                    applied.entitlements +=
+                        apply_change_entitlement(&store, &transaction, change).expect("ent");
+                }
+            }
+            transaction.commit().expect("commit");
+            applied
+        };
+
+        assert_eq!(applied.entitlements, 1);
+        let skill = store
+            .get_skill("remote-ent-2")
+            .expect("read")
+            .expect("skill");
+        assert_eq!(skill.sync_state, SkillSyncState::AccessRevoked);
+        assert!(!entitlement_allows_offline_use(
+            store
+                .get_entitlement("remote-ent-2")
+                .expect("read")
+                .as_ref(),
+            at(1_788_696_000)
+        ));
+    }
+
+    #[test]
+    fn malformed_entitlement_fails_whole_page() {
+        let (_temp, store) = open_temp_store();
+        let mut item = upsert("remote-ent-3", 1);
+        item.metadata = json!({
+            "name": "Broken Lease",
+            "slug": "broken-lease",
+            "entitlement": {"lease": "lease-token"},
+        });
+
+        // The malformed lease must fail the page so the cursor never advances
+        // past a lease the desktop could not interpret.
+        assert!(store
+            .apply_changes_page(&page(vec![item], "v1.AAAAAQ"))
+            .is_err());
+        // Nothing from the page landed, including the metadata upsert.
+        assert!(store.get_skill("remote-ent-3").expect("read").is_none());
+        assert!(store
+            .get_entitlement("remote-ent-3")
+            .expect("read")
+            .is_none());
+    }
+
+    fn at(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc.timestamp_opt(secs, 0).single().expect("ts")
     }
 }

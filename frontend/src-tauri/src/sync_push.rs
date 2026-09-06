@@ -100,10 +100,17 @@ impl MutationResponse {
 
 impl SyncClient {
     /// Submits one outbox mutation with its stable mutation ID.
+    ///
+    /// `remote_skill_id` falls back to the Skill's current `remote_id` when
+    /// the mutation row itself has no acknowledged remote ID yet (an update
+    /// against content the device created earlier: the create mutation
+    /// carries the ACK, the follow-up update may not). The server requires
+    /// `remoteSkillId` on update/delete, so dropping it would be a 422.
     pub fn submit_mutation(
         &self,
         device_id: &str,
         mutation: &LocalMutation,
+        skill_remote_id: Option<&str>,
         metadata: Option<MutationMetadata<'_>>,
     ) -> Result<MutationResponse, crate::sync_client::SyncClientError> {
         let operation: &'static str = match mutation.operation {
@@ -111,13 +118,17 @@ impl SyncClient {
             MutationOperation::Update => "update",
             MutationOperation::Delete => "delete",
         };
+        let remote_skill_id = mutation
+            .acknowledged_remote_id
+            .as_deref()
+            .or(skill_remote_id);
         let request = MutationRequest {
             protocol_version: 1,
             device_id,
             mutation_id: &mutation.id,
             operation,
             client_skill_id: &mutation.skill_id,
-            remote_skill_id: mutation.remote_skill_id_of(),
+            remote_skill_id,
             base_revision: mutation.base_revision,
             package_manifest_hash: mutation.package_manifest_hash_of(),
             metadata,
@@ -127,10 +138,6 @@ impl SyncClient {
 }
 
 impl LocalMutation {
-    fn remote_skill_id_of(&self) -> Option<&str> {
-        self.acknowledged_remote_id.as_deref()
-    }
-
     fn package_manifest_hash_of(&self) -> Option<&str> {
         // Delete mutations carry no package; create/update reference the
         // snapshot payload hash.

@@ -262,8 +262,9 @@ fn dispatch_mutation(
         category: None,
         tags: None,
     });
+    let skill_remote_id = skill.as_ref().and_then(|skill| skill.remote_id.as_deref());
 
-    match client.submit_mutation(&device_id_for(store)?, mutation, metadata) {
+    match client.submit_mutation(&device_id_for(store)?, mutation, skill_remote_id, metadata) {
         Ok(response) => {
             store.apply_mutation_outcome(&response.into_outcome())?;
             Ok(())

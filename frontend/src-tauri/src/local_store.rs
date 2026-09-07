@@ -409,3 +409,82 @@ pub enum LocalStoreError {
     #[error("path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),
 }
+
+#[cfg(test)]
+mod migration_safety_tests {
+    use super::*;
+
+    /// The M4 checkpoint contract: opening a store whose schema is behind
+    /// leaves a queryable `*.pre-migration` snapshot beside the live file,
+    /// holding the pre-migration rows; a fresh install (no pending
+    /// migration) writes none.
+    #[test]
+    fn migration_backup_is_created_when_a_migration_is_pending() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("skillhive.db");
+
+        // Build a schema-v1 store by hand (current code would migrate to v4
+        // on open): apply only migration 1 via rusqlite, then seed a row.
+        {
+            let mut connection = rusqlite::Connection::open(&db_path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    "#,
+                )
+                .expect("schema_migrations");
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .expect("tx");
+            transaction
+                .execute_batch(migrations::MIGRATIONS[0].1)
+                .expect("migration 1");
+            transaction
+                .execute("INSERT INTO schema_migrations(version) VALUES (1)", [])
+                .expect("stamp");
+            transaction.commit().expect("commit");
+            connection
+                .execute(
+                    "INSERT INTO local_skills(id, name, slug, workspace_path, current_blob_hash, sync_state) \
+                     VALUES ('legacy-1', 'Legacy', 'legacy', 'C:\\w', 'sha256:legacy', 'remote_only')",
+                    [],
+                )
+                .expect("seed skill");
+        }
+
+        // Opening through LocalStore runs the pending migrations — and must
+        // have backed the pre-migration bytes up first.
+        let store = LocalStore::open(&db_path).expect("migrate store");
+        assert_eq!(
+            store.health().expect("health").schema_version,
+            migrations::LATEST_SCHEMA_VERSION
+        );
+
+        // The backup is a valid SQLite database still carrying the legacy row.
+        let backup_path = db_path.with_extension("sqlite3.pre-migration");
+        let backup_connection = Connection::open(&backup_path).expect("open backup");
+        let count: i64 = backup_connection
+            .query_row("SELECT COUNT(*) FROM local_skills", [], |row| row.get(0))
+            .expect("backup queryable");
+        assert_eq!(count, 1, "backup must contain the pre-migration data");
+
+        // The migrated live store kept the legacy row.
+        let skill = store.get_skill("legacy-1").expect("read").expect("skill");
+        assert_eq!(skill.id, "legacy-1");
+    }
+
+    #[test]
+    fn fresh_install_writes_no_migration_backup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("fresh.db");
+        let _store = LocalStore::open(&db_path).expect("fresh store");
+        assert!(
+            !db_path.with_extension("sqlite3.pre-migration").exists(),
+            "no backup on a fresh install"
+        );
+    }
+}

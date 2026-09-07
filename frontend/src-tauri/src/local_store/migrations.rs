@@ -5,7 +5,7 @@ use std::path::Path;
 
 pub(super) const LATEST_SCHEMA_VERSION: i64 = 4;
 
-const MIGRATIONS: &[(i64, &str)] = &[
+pub(super) const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
         r#"
@@ -242,14 +242,17 @@ pub(super) fn migrate(connection: &mut Connection, db_path: &Path) -> Result<(),
         .copied()
         .collect();
 
-    if !pending.is_empty() {
+    // A fresh install (empty database) has nothing to lose; the checkpoint
+    // matters only when an existing store is about to be migrated.
+    if !pending.is_empty() && !is_fresh_database(connection) {
         // M4 migration-safety checkpoint (handoff §16): back the database up
         // before the first migration step of this launch. Each migration is
         // already transactional (step + version stamp commit atomically), but
         // the backup also covers non-transactional surroundings — disk-full
         // during WAL checkpointing, a torn page, or an app kill between
         // steps. Startup replays the backup over the damaged store, so a
-        // failed migration costs at most the pending steps, never data.
+        // failed migration costs at most the pending steps, never data. A
+        // fresh install has nothing to lose, so it writes no backup.
         super::backup_database(connection, db_path, &pending[0].0)?;
     }
 
@@ -266,4 +269,21 @@ pub(super) fn migrate(connection: &mut Connection, db_path: &Path) -> Result<(),
     }
 
     Ok(())
+}
+
+/// True when the connection points at a database with no user tables yet —
+/// i.e. a fresh install where every migration is about to run on nothing.
+/// Only the migration bookkeeping table (created just above) exists.
+fn is_fresh_database(connection: &Connection) -> bool {
+    let user_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name != 'schema_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    user_tables == 0
 }

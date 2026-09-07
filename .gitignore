@@ -90,3 +90,4 @@ design-system/
 tmp/
 temp/
 .cache/
+.zcode/

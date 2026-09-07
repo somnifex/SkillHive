@@ -1,4 +1,5 @@
 pub mod import;
+pub mod zip;
 
 use std::{
     fs::{self, OpenOptions},

@@ -39,7 +39,7 @@ use sync_client::{DeviceRegistrationRequest, SyncClient};
 use sync_worker::{spawn_sync_worker, SyncWorkerHandle};
 use tauri::Manager;
 use uninstall::{UninstallEngine, UninstallRequest};
-use workspace::{WorkspaceRef, WorkspaceStore};
+use workspace::{zip::ZipImportOutcome, WorkspaceRef, WorkspaceStore};
 
 #[derive(Debug, Default)]
 pub struct DesktopMutationCoordinator {
@@ -238,6 +238,98 @@ fn create_skill_workspace(
     workspaces
         .create(&request.skill_id, &request.initial_skill_md)
         .map_err(|error| error.to_string())
+}
+
+/// Opens the native zip picker inside Rust (the WebView never submits
+/// paths), extracts the archive through the snapshot-safe import path and
+/// queues the create mutation in the same commit shape as
+/// `commit_local_skill_workspace`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZipImportRequest {
+    pub name: String,
+    pub slug: String,
+}
+
+#[tauri::command]
+fn import_skill_zip_from_dialog(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+    workspaces: tauri::State<'_, WorkspaceStore>,
+    sync_worker: tauri::State<'_, SyncWorkerHandle>,
+    request: ZipImportRequest,
+) -> Result<Option<ZipImportOutcome>, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+
+    // The dialog lives in Rust: the WebView only ever learns whether the
+    // user picked a file, never a filesystem path.
+    let Some(zip_path) = rfd::FileDialog::new()
+        .add_filter("Skill 包 (zip)", &["zip"])
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+
+    let skill_id = uuid::Uuid::new_v4().to_string();
+    let outcome = workspace::zip::import_skill_zip(&blobs, &workspaces, &zip_path, &skill_id)
+        .map_err(|error| error.to_string())?;
+
+    let snapshot = capture_workspace(&blobs, &outcome.workspace.path, SnapshotPolicy::default())
+        .map_err(|error| error.to_string())?;
+    store
+        .commit_skill_edit(CommitSkillEdit {
+            skill_id: skill_id.clone(),
+            remote_id: None,
+            name: request.name,
+            slug: request.slug,
+            workspace_path: outcome.workspace.path.clone(),
+            blob_hash: snapshot.manifest_hash.clone(),
+            base_revision: None,
+            operation: MutationOperation::Create,
+        })
+        .map_err(|error| error.to_string())?;
+    sync_worker.request_sync();
+
+    Ok(Some(ZipImportOutcome {
+        workspace: outcome.workspace,
+        manifest_hash: outcome.manifest_hash,
+        source_file_name: outcome.source_file_name,
+        file_count: outcome.file_count,
+    }))
+}
+
+#[tauri::command]
+fn export_skill_zip_to_dialog(
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+    skill_id: String,
+) -> Result<Option<String>, String> {
+    // The UI list is server-side, so the local row may be keyed by either id.
+    let skill = match store
+        .get_skill(&skill_id)
+        .map_err(|error| error.to_string())?
+        .or_else(|| store.get_skill_by_remote_id(&skill_id).ok().flatten())
+    {
+        Some(skill) => skill,
+        None => return Err(format!("local skill not found: {skill_id}")),
+    };
+
+    let default_name = format!("{}.zip", skill.slug);
+    let Some(destination) = rfd::FileDialog::new()
+        .add_filter("Skill 包 (zip)", &["zip"])
+        .set_file_name(&default_name)
+        .save_file()
+    else {
+        return Ok(None);
+    };
+
+    workspace::zip::export_skill_zip(&blobs, &skill.current_blob_hash, &destination)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -1051,6 +1143,8 @@ pub fn run() {
             save_agent_profile,
             create_skill_workspace,
             get_skill_workspace,
+            import_skill_zip_from_dialog,
+            export_skill_zip_to_dialog,
             commit_local_skill_workspace,
             release_skill_workspace,
             deploy_skill_to_agent,

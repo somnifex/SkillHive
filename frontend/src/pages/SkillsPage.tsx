@@ -1,4 +1,4 @@
-import { Copy, Eye, PackageOpen, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Copy, Eye, FileArchive, PackageOpen, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
@@ -19,6 +19,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { api, errorMessage } from "../api/client";
+import { exportSkillZip, hasDesktopCommands, importSkillZip } from "../api/desktop";
 import { PageHeader } from "../components/PageHeader";
 import type { Page, Skill, SkillVersion } from "../types";
 
@@ -32,6 +33,20 @@ interface SkillFormValues {
   status?: string;
 }
 
+interface ZipImportForm {
+  name: string;
+  slug: string;
+}
+
+function slugify(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 140);
+}
+
 export function SkillsPage() {
   const { message } = App.useApp();
   const queryClient = useQueryClient();
@@ -40,7 +55,9 @@ export function SkillsPage() {
   const [status, setStatus] = useState<string>();
   const [editing, setEditing] = useState<Skill | null>(null);
   const [detail, setDetail] = useState<Skill | null>(null);
+  const [zipOpen, setZipOpen] = useState(false);
   const [form] = Form.useForm<SkillFormValues>();
+  const [zipForm] = Form.useForm<ZipImportForm>();
   const modalOpen = params.get("create") === "1" || Boolean(editing);
 
   const skills = useQuery({
@@ -109,6 +126,33 @@ export function SkillsPage() {
     }
   };
 
+  // Desktop-only zip packaging (the server never stores archives; the
+  // desktop imports them into its managed workspace and syncs blobs).
+  const importZip = useMutation({
+    mutationFn: async (values: ZipImportForm) => importSkillZip(values),
+    onSuccess: (result) => {
+      if (result) {
+        message.success(
+          `已从 ${result.sourceFileName} 导入 ${result.fileCount} 个文件，将自动同步到服务器`,
+        );
+      }
+      setZipOpen(false);
+      zipForm.resetFields();
+      queryClient.invalidateQueries({ queryKey: ["skills"] });
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  });
+  const exportZip = async (skill: Skill) => {
+    try {
+      const destination = await exportSkillZip(skill.id);
+      if (destination) {
+        message.success(`已导出到 ${destination}`);
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : errorMessage(error));
+    }
+  };
+
   const copy = async (skill: Skill) => {
     try {
       await api.post(`/skills/${skill.id}/copy`);
@@ -142,17 +186,30 @@ export function SkillsPage() {
         title="我的 Skills"
         description="这些内容仅对你可见，每次内容修改都会保留一个新版本。"
         actions={
-          <Button
-            type="primary"
-            icon={<Plus size={17} aria-hidden="true" />}
-            onClick={() => {
-              setEditing(null);
-              form.resetFields();
-              setParams({ create: "1" });
-            }}
-          >
-            创建 Skill
-          </Button>
+          <>
+            {hasDesktopCommands() && (
+              <Button
+                icon={<FileArchive size={17} aria-hidden="true" />}
+                onClick={() => {
+                  zipForm.resetFields();
+                  setZipOpen(true);
+                }}
+              >
+                从 zip 导入
+              </Button>
+            )}
+            <Button
+              type="primary"
+              icon={<Plus size={17} aria-hidden="true" />}
+              onClick={() => {
+                setEditing(null);
+                form.resetFields();
+                setParams({ create: "1" });
+              }}
+            >
+              创建 Skill
+            </Button>
+          </>
         }
       />
       <div className="toolbar">
@@ -245,6 +302,14 @@ export function SkillsPage() {
                   icon={<Copy size={17} aria-hidden="true" />}
                   onClick={() => copy(record)}
                 />
+                {hasDesktopCommands() && (
+                  <Button
+                    type="text"
+                    aria-label="导出为 zip"
+                    icon={<FileArchive size={17} aria-hidden="true" />}
+                    onClick={() => exportZip(record)}
+                  />
+                )}
                 <Popconfirm
                   title="删除这个 Skill？"
                   description="内容会被软删除，历史审计记录仍会保留。"
@@ -310,6 +375,36 @@ export function SkillsPage() {
             rules={[{ required: true, message: "请输入 Skill 指令" }]}
           >
             <Input.TextArea rows={8} />
+          </Form.Item>
+        </Form>
+      </Modal>
+      <Modal
+        open={zipOpen}
+        title="从 zip 导入 Skill"
+        okText="导入"
+        confirmLoading={importZip.isPending}
+        onCancel={() => setZipOpen(false)}
+        onOk={() => zipForm.submit()}
+      >
+        <Typography.Paragraph type="secondary">
+          选择本地 zip 包后，将在内置客户端中解包校验（SKILL.md 入口、文件数与大小
+          限制、防路径穿越）并进入托管工作区，随后自动同步到服务器。
+        </Typography.Paragraph>
+        <Form
+          form={zipForm}
+          layout="vertical"
+          onValuesChange={(_changed, values) => {
+            if (values?.name && !zipForm.getFieldValue("slug")) {
+              zipForm.setFieldValue("slug", slugify(values.name));
+            }
+          }}
+          onFinish={(values) => importZip.mutate(values)}
+        >
+          <Form.Item name="name" label="Skill 名称" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="slug" label="Slug" rules={[{ required: true }]}>
+            <Input placeholder="my-skill" />
           </Form.Item>
         </Form>
       </Modal>

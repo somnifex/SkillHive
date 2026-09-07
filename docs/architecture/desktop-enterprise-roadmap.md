@@ -178,12 +178,17 @@ Agent adapters handle capability and filesystem conventions only; they do not ow
 
 ## Immediate development scope
 
+> Superseded 2026-09-08: the scope below described the first M0/M1 branch.
+> Delivery has since reached M4 + desktop productization (branch
+> `feat/desktop-productization`, live-validated). Current state and next
+> steps: `docs/development/CURRENT_STATUS.md`.
+
 The first implementation branch intentionally limits itself to M0 and the beginning of M1:
 
 1. Introduce the Tauri desktop shell without deleting the web build.
 2. Create the Rust module boundaries for local persistence, sync, credentials, and agent deployment.
 3. Add the initial agent descriptor/profile model.
 4. Preserve the existing FastAPI server and API behavior unchanged.
-5. Add CI/build checks before deeper migration work.
+5. (superseded by owner policy: no GitHub Actions — validate locally per LOCAL_VALIDATION_CHECKLIST).
 
 This sequencing keeps the current server usable while the desktop architecture becomes testable incrementally.

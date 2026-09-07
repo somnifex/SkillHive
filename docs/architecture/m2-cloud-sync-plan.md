@@ -1,6 +1,6 @@
 # M2 Cloud Sync Protocol — Detailed Engineering Plan
 
-Status: planned after M1 code-complete checkpoint
+Status: IMPLEMENTED 2026-09-05/06 (M2.0–M2.7 all landed, M2.8 reliability scenarios live-validated; retained as design record — current state see CURRENT_STATUS.md)
 
 ## 1. Objective
 

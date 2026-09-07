@@ -192,7 +192,7 @@ built `skillhive-desktop.exe`, driven through the GUI:
 | M2 Cloud sync epic (#4) | IN PROGRESS |
 | M2.0 Shared Skill mutation path (#5) | CODE COMPLETE — backend validated locally (see validation truth) |
 | M2.1 Protocol/schema foundation (#6) | IN PROGRESS — SQLite-validated; PostgreSQL/MySQL bypassed by owner instruction |
-| M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc landed (`docs/development/GC_DESIGN.md`, destructive sweep deliberately deferred) |
+| M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc landed and the destructive sweep + cursor-expiry contract are implemented with unit tests (`a4f28c3`), **but `run_blob_gc`/`trim_expired_rows` have no production scheduler yet — see known issues** |
 | M2.3 Device identity/secure credentials (#8) | CODE COMPLETE — server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
 | M2.4 Idempotent push (#9) | CODE COMPLETE (desktop) — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed |
 | M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; **workspace hydration landed 2026-09-07 on `feat/desktop-productization` (`hydrate_skill` + `hydrate_skill_workspace`, pulled skills deploy end to end)** |
@@ -203,27 +203,27 @@ built `skillhive-desktop.exe`, driven through the GUI:
 
 ## Exact next task
 
-Continue on branch `feat/m2-continue`. M4 is in progress: the
-observability + migration-safety packages landed (see M4 state below).
-The remaining M4 work is the **fault-injection test package** (network
-loss / crash / duplicate / 5xx / auth-change / disk-full — mostly
-already covered live; needs pytest+cargo home in one recorded
-checklist), the **signed release/update process** (design-only given the
-local-only constraint), and the **release SLO/correctness gates** doc.
-Remaining M2 gaps stay record-only:
-
-1. **M2.2 destructive GC sweep** — design doc landed; implementation
-   deliberately deferred.
-2. **PostgreSQL/MySQL migration re-validation** when a server becomes
+1. **Merge/PR decision for `feat/desktop-productization`** (ahead of local
+   `main` by 12 commits, live-validated 2026-09-07/08 — see the
+   productization + live-validation sections above). Rebase on `main`,
+   open the PR when `origin` is reachable, merge after the checklist §42
+   scenarios that need a second machine are re-run.
+2. **Wire GC/trim into production scheduling** — `run_blob_gc`
+   (destructive mark-and-sweep) and `trim_expired_rows` are implemented with
+   unit tests (`a4f28c3`) and the `SYNC_CURSOR_EXPIRED` contract is live in
+   `sync_changes.py`, but **neither has a production caller**; today only the
+   trash-retention sweep is scheduled in `main.py`. Until wired in, purged
+   skills leave orphan blobs that only manual GC runs reclaim. Decide:
+   daily worker (alongside the trash sweep) or documented manual trigger.
+3. **Known issue — web session loss on WebView reload**: an expired access
+   token drops the REST session while keyring credentials persist; the user
+   must re-login. Either persist the access token behind the Rust boundary
+   or auto-restore the session from the device credential at startup.
+4. **PostgreSQL/MySQL migration re-validation** when a server becomes
    available (owner bypassed SQL-server flows, 2026-09-04).
-3. **UI-side local-skill surface (mostly closed 2026-09-07)** — SkillsPage
-   and the new Agent 部署 page now consume deploy/uninstall/discover/prefs/
-   hydrate/sync/conflict commands; local *editing* (create/commit via
-   `commit_local_skill_workspace`) still uses the REST path — acceptable
-   while the server remains the creation authority for typed content.
-4. Trash restore on the desktop currently goes through the REST endpoints
-   (online-only); offline restore would need a new sync mutation type and is
-   deliberately deferred (protocol v1 unchanged).
+5. M4 remaining: fault-injection test package (mostly covered live; needs
+   the one recorded checklist), signed release/update process (design-only),
+   release SLO gates doc.
 
 ## M3 state (2026-09-07)
 

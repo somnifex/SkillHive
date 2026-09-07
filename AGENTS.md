@@ -188,6 +188,11 @@ Evict only recoverable clean content. Prefer claiming local state as `remote_onl
 
 ## 8. Current milestone policy
 
+> Snapshot note (2026-09-08): the milestone states below were captured at the
+> 2026-09-04 handoff and are **superseded** — M2.0–M2.7 are code complete with
+> local validation, M3 is live-validated, and desktop productization is done.
+> The authoritative state is `docs/development/CURRENT_STATUS.md`.
+
 Milestone states use these exact meanings:
 
 - `VERIFIED`: executed locally and validation passed.
@@ -210,7 +215,12 @@ See `docs/development/CURRENT_STATUS.md` and `docs/development/LOCAL_AGENT_HANDO
 
 ## 9. Immediate next task
 
-Continue **M2.1 / Issue #6** before starting M2.2.
+> Superseded (2026-09-08): M2 is complete and the sync worker is live-validated.
+> Do not resume M2.1 work — see `docs/development/CURRENT_STATUS.md` § "Exact
+> next task" for the current continuation (productization branch merge, GC
+> scheduling, known issues).
+
+Original handoff instruction: continue **M2.1 / Issue #6** before starting M2.2.
 
 Do not jump directly to a sync worker.
 

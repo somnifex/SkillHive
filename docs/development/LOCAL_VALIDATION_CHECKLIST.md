@@ -1,9 +1,9 @@
 # SkillHive Local Validation Checklist
 
-Last updated: 2026-09-04
+Last updated: 2026-09-08
 Validation mode: local developer machine only
 CI policy: do not use GitHub Actions unless the owner explicitly authorizes it
-Primary local continuation branch: `feat/m2-sync`
+Primary local continuation branch: `feat/desktop-productization`
 
 This checklist defines what must be executed before a milestone can move from `CODE COMPLETE / PENDING LOCAL VALIDATION` to `VERIFIED`.
 
@@ -21,7 +21,7 @@ Read `AGENTS.md` and `LOCAL_AGENT_HANDOFF.md` first.
 - Record exact toolchain versions and the first failing command before changing code.
 - Fix the implementation rather than weakening tests/constraints unless the design itself is proven wrong.
 - A passing fresh install does not validate an upgrade migration. Test both.
-- PR #3 has already been merged. The active continuation branch is now `feat/m2-sync`.
+- PR #3 has already been merged. The active continuation branch (2026-09-08) is `feat/desktop-productization`.
 
 ### Known flaky check (pre-existing, recorded 2026-09-07)
 
@@ -180,11 +180,15 @@ DATABASE_URL=sqlite:///./tmp/m2-fresh.db uv run alembic upgrade head
 DATABASE_URL=sqlite:///./tmp/m2-fresh.db uv run alembic current
 ```
 
-Expected Alembic head includes:
+Expected Alembic head (2026-09-08):
 
 ```text
-b6a31d0f4c9e
+a9b0c1d2e3f4
 ```
+
+Chain: `2e26577093dc → 7f4c2b8a91de → b6a31d0f4c9e → c4d5e6f7a8b9 →
+e8f1a2b3c4d5 → f7a8b9c0d1e2 → a9b0c1d2e3f4`. Re-check CURRENT_STATUS for
+the current head before judging a mismatch.
 
 Inspect tables/constraints with a local SQLite client or a short Python/SQLAlchemy script.
 
@@ -413,7 +417,7 @@ Do not add `Cargo.lock` to `.gitignore`.
 
 ## 17. Local SQLite migration chain
 
-Test a new DB reaches schema v3.
+Test a new DB reaches schema v5 (deployment_prefs; see local_store/migrations.rs LATEST_SCHEMA_VERSION).
 
 Also create representative schema-v1 and schema-v2 databases and reopen through current `LocalStore`.
 
@@ -666,7 +670,7 @@ Record the lockfile behavior. Preserve the existing package manager choice.
 
 ## 34. Desktop dev command
 
-The branch has not yet established a locally verified Tauri developer command.
+RESOLVED: the Tauri CLI is pinned in-repo and `pnpm exec tauri build` is validated (NSIS bundle produced 2026-09-07/08).
 
 Determine and document a reproducible path.
 
@@ -804,7 +808,7 @@ Failure modes to watch for:
 - a custom profile whose directory is a symlink or relative path is rejected
   by `validate_skill_root` — by design (Rust boundary).
 
-## 43. Current handoff state
+## 43. Handoff snapshot (historical, 2026-09-04)
 
 At the time this file was created:
 

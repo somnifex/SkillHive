@@ -427,9 +427,12 @@ class SkillMutationService:
 
         Only tombstoned (deleted) skills may be purged, so an accidental
         purge cannot bypass the trash. The skill row cascades to its
-        versions; unreferenced blobs are reclaimed later by the existing
-        mark-and-sweep GC. A second tombstone is emitted first so desktop
-        mirrors that missed the soft-delete event still clean up.
+        versions; unreferenced blobs are reclaimed by the mark-and-sweep GC
+        (blob_gc.py) — which is implemented and unit-tested but currently
+        has no production scheduler, so reclamation happens on the next
+        manual/scheduled GC run rather than inline with the purge. A second
+        tombstone is emitted first so desktop mirrors that missed the
+        soft-delete event still clean up.
         """
         if skill.status != "deleted" or skill.deleted_at is None:
             raise AppError(

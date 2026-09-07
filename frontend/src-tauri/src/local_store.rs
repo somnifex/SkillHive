@@ -5,6 +5,7 @@ mod entitlements;
 mod migrations;
 mod mutations;
 mod outcomes;
+mod prefs;
 mod pull_apply;
 mod skills;
 mod sync_state;

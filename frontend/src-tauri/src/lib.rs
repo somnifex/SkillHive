@@ -3,6 +3,7 @@ pub mod blob_store;
 pub mod cache_manager;
 pub mod credentials;
 pub mod deployment;
+pub mod hydrate;
 pub mod local_store;
 pub mod server_config;
 pub mod skill_snapshot;
@@ -174,6 +175,37 @@ pub struct UninstallSkillFromAgentResult {
     pub agent_profile_id: String,
     pub target_existed: bool,
     pub recovery_pending: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentPrefsResult {
+    pub default_targets: Vec<String>,
+    pub skill_targets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDeploymentPrefsRequest {
+    /// `None` reads the current value; `Some(ids)` replaces it. An empty list
+    /// clears the per-skill override / the global default.
+    pub skill_id: Option<String>,
+    pub profile_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploySkillBatchRequest {
+    pub skill_id: String,
+    pub agent_profile_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploySkillBatchItem {
+    pub agent_profile_id: String,
+    pub result: Option<DeploySkillToAgentResult>,
+    pub error: Option<String>,
 }
 
 #[tauri::command]
@@ -460,6 +492,8 @@ fn deploy_skill_to_agent(
     store: tauri::State<'_, LocalStore>,
     blobs: tauri::State<'_, BlobStore>,
     deployment_engine: tauri::State<'_, DeploymentEngine>,
+    client: tauri::State<'_, SyncClientHandle>,
+    workspaces: tauri::State<'_, WorkspaceStore>,
     request: DeploySkillToAgentRequest,
 ) -> Result<DeploySkillToAgentResult, String> {
     let _guard = coordinator
@@ -467,10 +501,62 @@ fn deploy_skill_to_agent(
         .lock()
         .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
 
+    hydrate_if_needed(
+        &client.get(),
+        &store,
+        &blobs,
+        &workspaces,
+        &request.skill_id,
+    )?;
+
+    deploy_single(
+        &store,
+        &blobs,
+        &deployment_engine,
+        &request.skill_id,
+        &request.agent_profile_id,
+    )
+}
+
+/// A pulled record carries metadata only until hydration materializes its
+/// snapshot closure and workspace. Deploying must transparently hydrate
+/// first so remote-created skills deploy like locally-created ones.
+fn hydrate_if_needed(
+    client: &SyncClient,
+    store: &LocalStore,
+    blobs: &BlobStore,
+    workspaces: &WorkspaceStore,
+    skill_id: &str,
+) -> Result<(), String> {
     let skill = store
-        .get_skill(&request.skill_id)
+        .get_skill(skill_id)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("skill not found: {}", request.skill_id))?;
+        .ok_or_else(|| format!("skill not found: {skill_id}"))?;
+    let workspace_exists = workspaces
+        .get(skill_id)
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if !matches!(skill.sync_state, SkillSyncState::RemoteOnly) && workspace_exists {
+        return Ok(());
+    }
+    hydrate::hydrate_skill(client, store, blobs, workspaces, skill_id)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// One transactional deployment, shared by the single and batch commands.
+/// Callers own the mutation coordinator lock.
+fn deploy_single(
+    store: &LocalStore,
+    blobs: &BlobStore,
+    deployment_engine: &DeploymentEngine,
+    skill_id: &str,
+    agent_profile_id: &str,
+) -> Result<DeploySkillToAgentResult, String> {
+    let skill = store
+        .get_skill(skill_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("skill not found: {skill_id}"))?;
     if matches!(
         skill.sync_state,
         SkillSyncState::RemoteOnly | SkillSyncState::AccessRevoked | SkillSyncState::Corrupted
@@ -482,16 +568,16 @@ fn deploy_skill_to_agent(
     }
 
     let profile = store
-        .get_agent_profile(&request.agent_profile_id)
+        .get_agent_profile(agent_profile_id)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("agent profile not found: {}", request.agent_profile_id))?;
+        .ok_or_else(|| format!("agent profile not found: {agent_profile_id}"))?;
     if !profile.enabled {
         return Err(format!("agent profile is disabled: {}", profile.id));
     }
 
     let filesystem_result = deployment_engine
         .deploy(
-            &blobs,
+            blobs,
             DeploymentRequest {
                 skill_id: skill.id.clone(),
                 agent_profile_id: profile.id.clone(),
@@ -503,7 +589,7 @@ fn deploy_skill_to_agent(
         .map_err(|error| error.to_string())?;
 
     verify_materialized_snapshot(
-        &blobs,
+        blobs,
         &filesystem_result.snapshot_hash,
         &filesystem_result.target_path,
     )
@@ -521,12 +607,158 @@ fn deploy_skill_to_agent(
         .map_err(|error| error.to_string())?;
 
     let recovery_pending = deployment_engine
-        .acknowledge_catalog_commit(&blobs, &filesystem_result.transaction_id)
+        .acknowledge_catalog_commit(blobs, &filesystem_result.transaction_id)
         .is_err();
 
     Ok(DeploySkillToAgentResult {
         deployment: catalog,
         recovery_pending,
+    })
+}
+
+/// Deploys one skill to several agent profiles sequentially. A failing
+/// target never aborts the remaining targets: each entry reports its own
+/// outcome so the UI can show per-agent results.
+#[tauri::command]
+fn deploy_skill_batch(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+    deployment_engine: tauri::State<'_, DeploymentEngine>,
+    client: tauri::State<'_, SyncClientHandle>,
+    workspaces: tauri::State<'_, WorkspaceStore>,
+    request: DeploySkillBatchRequest,
+) -> Result<Vec<DeploySkillBatchItem>, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+
+    hydrate_if_needed(
+        &client.get(),
+        &store,
+        &blobs,
+        &workspaces,
+        &request.skill_id,
+    )?;
+
+    let mut results = Vec::with_capacity(request.agent_profile_ids.len());
+    for agent_profile_id in &request.agent_profile_ids {
+        match deploy_single(
+            &store,
+            &blobs,
+            &deployment_engine,
+            &request.skill_id,
+            agent_profile_id,
+        ) {
+            Ok(result) => results.push(DeploySkillBatchItem {
+                agent_profile_id: agent_profile_id.clone(),
+                result: Some(result),
+                error: None,
+            }),
+            Err(error) => results.push(DeploySkillBatchItem {
+                agent_profile_id: agent_profile_id.clone(),
+                result: None,
+                error: Some(error),
+            }),
+        }
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+fn list_deployments(
+    store: tauri::State<'_, LocalStore>,
+) -> Result<Vec<SkillDeploymentRecord>, String> {
+    store.list_deployments().map_err(|error| error.to_string())
+}
+
+/// Materializes a pulled (or workspace-released) skill's snapshot closure
+/// and managed workspace locally, so it can be inspected and deployed.
+#[tauri::command]
+fn hydrate_skill_workspace(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+    workspaces: tauri::State<'_, WorkspaceStore>,
+    client: tauri::State<'_, SyncClientHandle>,
+    request: HydrateSkillWorkspaceRequest,
+) -> Result<hydrate::HydrationOutcome, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    hydrate::hydrate_skill(
+        &client.get(),
+        &store,
+        &blobs,
+        &workspaces,
+        &request.skill_id,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HydrateSkillWorkspaceRequest {
+    pub skill_id: String,
+}
+
+#[tauri::command]
+fn get_deployment_prefs(
+    store: tauri::State<'_, LocalStore>,
+    skill_id: Option<String>,
+) -> Result<DeploymentPrefsResult, String> {
+    let default_targets = store
+        .default_deployment_targets()
+        .map_err(|error| error.to_string())?;
+    let skill_targets = match &skill_id {
+        Some(skill_id) => store
+            .skill_deployment_targets(skill_id)
+            .map_err(|error| error.to_string())?,
+        None => None,
+    };
+    Ok(DeploymentPrefsResult {
+        default_targets,
+        skill_targets,
+    })
+}
+
+#[tauri::command]
+fn set_deployment_prefs(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    request: SetDeploymentPrefsRequest,
+) -> Result<DeploymentPrefsResult, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+
+    match &request.skill_id {
+        None => {
+            store
+                .set_default_deployment_targets(&request.profile_ids)
+                .map_err(|error| error.to_string())?;
+        }
+        Some(skill_id) => {
+            store
+                .set_skill_deployment_targets(skill_id, &request.profile_ids)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let default_targets = store
+        .default_deployment_targets()
+        .map_err(|error| error.to_string())?;
+    let skill_targets = match &request.skill_id {
+        Some(skill_id) => store
+            .skill_deployment_targets(skill_id)
+            .map_err(|error| error.to_string())?,
+        None => None,
+    };
+    Ok(DeploymentPrefsResult {
+        default_targets,
+        skill_targets,
     })
 }
 
@@ -1148,6 +1380,11 @@ pub fn run() {
             commit_local_skill_workspace,
             release_skill_workspace,
             deploy_skill_to_agent,
+            deploy_skill_batch,
+            list_deployments,
+            get_deployment_prefs,
+            set_deployment_prefs,
+            hydrate_skill_workspace,
             uninstall_skill_from_agent,
             enforce_local_cache,
             set_local_cache_policy,

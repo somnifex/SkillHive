@@ -277,6 +277,30 @@ fn built_in_adapters() -> Vec<BuiltInAgentAdapter> {
             PathBuf::from(".grok").join("skills"),
             [PathBuf::from(".grok")],
         ),
+        BuiltInAgentAdapter::application(
+            "cursor",
+            "Cursor",
+            PathBuf::from(".cursor").join("skills"),
+            [PathBuf::from(".cursor")],
+        ),
+        BuiltInAgentAdapter::application(
+            "windsurf",
+            "Windsurf",
+            PathBuf::from(".windsurf").join("skills"),
+            [PathBuf::from(".windsurf")],
+        ),
+        BuiltInAgentAdapter::application(
+            "trae",
+            "Trae",
+            PathBuf::from(".trae").join("skills"),
+            [PathBuf::from(".trae")],
+        ),
+        BuiltInAgentAdapter::application(
+            "zcode",
+            "ZCode (智谱)",
+            PathBuf::from(".zcode").join("skills"),
+            [PathBuf::from(".zcode")],
+        ),
         BuiltInAgentAdapter::unified(),
     ]
 }
@@ -469,6 +493,43 @@ mod tests {
         assert!(descriptors.iter().any(|descriptor| {
             descriptor.id == "agent-skills" && descriptor.kind == AgentKind::UnifiedAgentSkills
         }));
+    }
+
+    #[test]
+    fn registry_contains_extended_agent_adapters() {
+        let descriptors = AgentRegistry::builtin().descriptors();
+        for id in ["cursor", "windsurf", "trae", "zcode"] {
+            let descriptor = descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == id)
+                .unwrap_or_else(|| panic!("missing built-in adapter: {id}"));
+            assert_eq!(descriptor.kind, AgentKind::Application);
+        }
+    }
+
+    #[test]
+    fn extended_builtin_profiles_keep_derived_roots() {
+        let home = home_dir().expect("home");
+        for (id, relative) in [
+            ("cursor", PathBuf::from(".cursor").join("skills")),
+            ("windsurf", PathBuf::from(".windsurf").join("skills")),
+            ("trae", PathBuf::from(".trae").join("skills")),
+            ("zcode", PathBuf::from(".zcode").join("skills")),
+        ] {
+            let expected = home.join(&relative);
+            assert!(
+                validate_persisted_profile(&format!("{id}:default"), id, &expected, false,).is_ok()
+            );
+            assert!(matches!(
+                validate_persisted_profile(
+                    &format!("{id}:default"),
+                    id,
+                    &home.join("forged-skills"),
+                    false,
+                ),
+                Err(AgentAdapterError::InvalidProfileIdentity(_))
+            ));
+        }
     }
 
     #[test]

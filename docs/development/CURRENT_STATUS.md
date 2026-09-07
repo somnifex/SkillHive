@@ -46,6 +46,21 @@ import/export. Design of record:
   S3 storage → 3 login server address → 4 zip import/export. Update this
   section as each phase lands.
 
+### Merged into main (2026-09-07, local)
+
+`feat/group-tree-admin` (8 commits, fast-forward) and
+`feat/wanhua-ui-revamp` (the workspace UI revamp, committed as `a120f13`)
+are both merged into `main` via merge commit `b2303c7`. The five overlapping
+page files (GroupsPage / GroupDetailPage / AuthPages / SkillsPage /
+AdminPage) were resolved by taking the wanhua visual revamp as the base and
+re-applying the feature deltas (group tree table, sub-group creation,
+breadcrumbs, server-address field, zip import/export, admin console
+surfaces). Post-merge validation on `main`: backend ruff/mypy clean +
+**pytest 130 passed**, frontend lint/typecheck/test/build green,
+`cargo test --lib` **107 passed** + clippy/fmt clean, Alembic fresh →
+`f7a8b9c0d1e2`. `origin` is still unreachable (SSH) — push when access is
+restored.
+
 ### Landed 2026-09-07 (all phases, commits `027088b` → `dc94566`)
 
 - **Group tree** (`41dd0ad` + `af768df`): `groups.parent_id` self-reference

@@ -8,13 +8,17 @@ import {
   Plus,
   Rocket,
   Search,
+  Tag as TagIcon,
+  Undo2,
   Trash2,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
+  AutoComplete,
   Button,
   Checkbox,
+  Popover,
   Tabs,
   Drawer,
   Empty,
@@ -103,12 +107,19 @@ export function SkillsPage() {
   const [zipForm] = Form.useForm<ZipImportForm>();
   const modalOpen = params.get("create") === "1" || Boolean(editing);
 
+  const [categoryFilter, setCategoryFilter] = useState<string>();
   const skills = useQuery({
-    queryKey: ["skills", search, status, page],
+    queryKey: ["skills", search, status, page, categoryFilter],
     queryFn: () =>
       api
         .get<Page<Skill>>("/skills", {
-          params: { query: search || undefined, status, page, page_size: 20 },
+          params: {
+            query: search || undefined,
+            status,
+            category: categoryFilter || undefined,
+            page,
+            page_size: 20,
+          },
         })
         .then((r) => r.data),
   });
@@ -117,6 +128,10 @@ export function SkillsPage() {
     queryFn: () =>
       api.get<SkillVersion[]>(`/skills/${detail!.id}/versions`).then((r) => r.data),
     enabled: Boolean(detail),
+  });
+  const categories = useQuery({
+    queryKey: ["skill-categories"],
+    queryFn: () => api.get<string[]>("/skills/categories").then((r) => r.data),
   });
 
   useEffect(() => {
@@ -288,6 +303,14 @@ export function SkillsPage() {
           prefix={<Search size={16} strokeWidth={1.7} aria-hidden="true" />}
           onChange={(event) => setSearch(event.target.value)}
           className="search-input"
+        />
+        <AutoComplete
+          allowClear
+          placeholder="全部分类"
+          value={categoryFilter}
+          onChange={setCategoryFilter}
+          style={{ minWidth: 160 }}
+          options={(categories.data ?? []).map((value) => ({ value, label: value }))}
         />
         <Select
           allowClear
@@ -497,7 +520,10 @@ export function SkillsPage() {
           </Form.Item>
           <div className="form-grid">
             <Form.Item name="category" label="分类">
-              <Input />
+              <AutoComplete
+                options={(categories.data ?? []).map((value) => ({ value, label: value }))}
+                filterOption
+              />
             </Form.Item>
             <Form.Item name="tags" label="标签">
               <Select mode="tags" />
@@ -558,7 +584,74 @@ export function SkillsPage() {
                     dataIndex: "status",
                     render: (v: string) => statusLabels[v] ?? v,
                   },
-                  { title: "变更", dataIndex: "change_log" },
+                  {
+                    title: "标签",
+                    dataIndex: "tags",
+                    render: (tags: string[] | undefined, row: SkillVersion) =>
+                      detail ? (
+                        <VersionTagsCell
+                          skillId={detail.id}
+                          version={row.version}
+                          tags={tags ?? []}
+                        />
+                      ) : null,
+                  },
+                  { title: "变更", dataIndex: "change_log", ellipsis: true },
+                  {
+                    title: "操作",
+                    width: 130,
+                    render: (_: unknown, row: SkillVersion) => (
+                      <Space size={4}>
+                        <Popconfirm
+                          title={`回滚到 ${row.version}？`}
+                          description="会以该版本内容创建一个新草稿版本。"
+                          onConfirm={async () => {
+                            if (!detail) return;
+                            try {
+                              await api.post(`/skills/${detail.id}/rollback`, {
+                                version: row.version,
+                              });
+                              message.success(`已创建回滚版本`);
+                              queryClient.invalidateQueries({
+                                queryKey: ["skill-versions", detail.id],
+                              });
+                              queryClient.invalidateQueries({ queryKey: ["skills"] });
+                            } catch (error) {
+                              message.error(errorMessage(error));
+                            }
+                          }}
+                        >
+                          <Button size="small" type="text" icon={<Undo2 size={14} aria-hidden="true" />}>
+                            回滚
+                          </Button>
+                        </Popconfirm>
+                        <Button
+                          size="small"
+                          type="text"
+                          icon={<Download size={14} aria-hidden="true" />}
+                          onClick={async () => {
+                            if (!detail) return;
+                            try {
+                              const { data } = await api.get(
+                                `/skills/${detail.id}/versions/${row.version}/export`,
+                                { responseType: "blob" },
+                              );
+                              const url = URL.createObjectURL(data as Blob);
+                              const anchor = document.createElement("a");
+                              anchor.href = url;
+                              anchor.download = `${detail.slug}_${row.version}.zip`;
+                              anchor.click();
+                              URL.revokeObjectURL(url);
+                            } catch (error) {
+                              message.error(errorMessage(error));
+                            }
+                          }}
+                        >
+                          下载
+                        </Button>
+                      </Space>
+                    ),
+                  },
                 ]}
               />
             </div>
@@ -717,5 +810,83 @@ function DeployModal({ skill, onClose }: { skill: Skill | null; onClose: () => v
         记住此 Skill 的部署目标（覆盖全局默认）
       </Checkbox>
     </Modal>
+  );
+}
+
+
+function VersionTagsCell({
+  skillId,
+  version,
+  tags,
+}: {
+  skillId: string;
+  version: string;
+  tags: string[];
+}) {
+  const { message } = App.useApp();
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const saveTags = useMutation({
+    mutationFn: (next: string[]) =>
+      api.put<SkillVersion>(`/skills/${skillId}/versions/${version}/tags`, { tags: next }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["skill-versions", skillId] });
+      setOpen(false);
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  });
+
+  return (
+    <Space size={4} wrap>
+      {tags.map((tag) => (
+        <Tag
+          key={tag}
+          closable
+          onClose={(event) => {
+            event.preventDefault();
+            saveTags.mutate(tags.filter((existing) => existing !== tag));
+          }}
+        >
+          {tag}
+        </Tag>
+      ))}
+      <Popover
+        open={open}
+        onOpenChange={setOpen}
+        trigger="click"
+        content={
+          <Space.Compact>
+            <Input
+              size="small"
+              placeholder="新标签"
+              value={draft}
+              style={{ width: 120 }}
+              onChange={(event) => setDraft(event.target.value)}
+              onPressEnter={() => {
+                if (draft.trim()) {
+                  saveTags.mutate([...tags, draft.trim()]);
+                  setDraft("");
+                }
+              }}
+            />
+            <Button
+              size="small"
+              type="primary"
+              icon={<TagIcon size={13} aria-hidden="true" />}
+              onClick={() => {
+                if (draft.trim()) {
+                  saveTags.mutate([...tags, draft.trim()]);
+                  setDraft("");
+                }
+              }}
+            />
+          </Space.Compact>
+        }
+      >
+        <Tag style={{ cursor: "pointer" }}>+ 标签</Tag>
+      </Popover>
+    </Space>
   );
 }

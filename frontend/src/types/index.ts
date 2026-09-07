@@ -30,6 +30,8 @@ export interface SkillVersion {
   id: string;
   skill_id: string;
   version: string;
+  revision?: number;
+  tags?: string[];
   content: {
     system_prompt?: string;
     instructions?: string;

@@ -110,6 +110,51 @@ Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
 - PostgreSQL/MySQL migration re-validation still bypassed per owner
   instruction (no server available) — unchanged from the standing record.
 
+### Landed 2026-09-07 (desktop productization, branch `feat/desktop-productization`)
+
+Owner-requested product package closing three feedback items (no visible
+upload path, "why is this a web page", management gaps):
+
+- **NSIS packaging** (`tauri.conf.json` `bundle.active=true`, zh/en NSIS,
+  `icons/icon.ico`): `pnpm tauri build` now emits a Windows installer; the
+  desktop app is the primary product form while the web build keeps working.
+- **Agent deployment surfaced in UI**: built-in adapters extended to 12
+  (+ Cursor `~/.cursor/skills`, Windsurf `~/.windsurf/skills`, Trae
+  `~/.trae/skills`, ZCode `~/.zcode/skills`; conventional paths, verify
+  against vendor docs if a target disagrees). New `/agents` page: discovery
+  cards, enable toggles, custom directories, global default deploy targets,
+  deployments table with uninstall. SkillsPage rows gain deploy (modal with
+  per-skill override persisted in new `deployment_prefs` local-store v5
+  table), hydrate ("下载到本地"), and batch deploy/delete; pagination bug
+  fixed (server-side page param wired).
+- **Workspace hydration (closes M2.5 leftover)**: new `hydrate_skill`
+  engine + `hydrate_skill_workspace` command materialize a pulled
+  `remote_only` skill's snapshot closure (verified blob downloads) and its
+  managed workspace; deploy commands auto-hydrate first. Pulled skills are
+  now deployable end to end.
+- **Sync/conflict surfaces**: top-bar SyncStatus chip (last push/pull,
+  server-error badge, 立即同步), desktop-only conflict center in Settings
+  (`list_conflicts` + keep_local/keep_remote).
+- **Trash lifecycle (server)**: soft delete = recycle bin;
+  `GET /skills/trash`, `POST /skills/{id}/restore` (returns as draft),
+  `DELETE /skills/{id}/purge` (versions cascade; blobs reclaimed by GC);
+  admin setting `trash_retention_days` (default 30, `0`=manual only) with a
+  daily background sweep (savepoint-per-row). `slug_exists` guard fixed to
+  match the (owner, slug) unique constraint (409 instead of 500 on
+  trash-reserved slugs).
+- **Version management**: `skill_versions.tags` JSON column (migration
+  `a9b0c1d2e3f4`), `PUT .../versions/{version}/tags` (unique per skill),
+  `POST /skills/{id}/rollback` (mints a NEW patch version from an old
+  content — additive, never a history rewrite), `GET .../versions/{version}/export`
+  portable zip; version drawer UI with tag editor / rollback / download.
+
+Validation truth (2026-09-07, local): backend ruff/mypy clean + **pytest 134
+passed**; Alembic fresh → `a9b0c1d2e3f4`, downgrade/upgrade round-trip
+verified; frontend lint/typecheck/test/build green; `cargo fmt --check`,
+`cargo clippy -D warnings` clean, `cargo test --lib` **116 passed**
+(includes hydration + deployment-prefs suites). PostgreSQL/MySQL re-validation
+remains bypassed per owner instruction.
+
 ## Current milestone state
 
 | Milestone | Current state |
@@ -122,7 +167,7 @@ Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
 | M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc landed (`docs/development/GC_DESIGN.md`, destructive sweep deliberately deferred) |
 | M2.3 Device identity/secure credentials (#8) | CODE COMPLETE — server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
 | M2.4 Idempotent push (#9) | CODE COMPLETE (desktop) — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed |
-| M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration deferred until a consumer needs it |
+| M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; **workspace hydration landed 2026-09-07 on `feat/desktop-productization` (`hydrate_skill` + `hydrate_skill_workspace`, pulled skills deploy end to end)** |
 | M2.6 Desktop sync orchestrator (#11) | CODE COMPLETE (desktop) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake landed (`sync_worker.rs`) and validated live |
 | M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (desktop) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side AND live client-process scenarios validated 2026-09-06 (see validation truth)** |
 | M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED — grant offline policy (migration `c4d5e6f7a8b9`), signed JWT entitlement leases shipped in pull metadata, desktop schema-v4 entitlement store, pull-apply + startup + post-pull reconciliation landed (`b2165a7`, `b5be325`, `97fe35e`, `bef5977`); **live CDP scenarios validated 2026-09-07 (see validation truth)** |
@@ -139,18 +184,18 @@ checklist), the **signed release/update process** (design-only given the
 local-only constraint), and the **release SLO/correctness gates** doc.
 Remaining M2 gaps stay record-only:
 
-1. **Workspaces/hydration polish (M2.5 leftover)** — pulled `remote_only`
-   records carry metadata + manifest only; workspace hydration (materialize
-   files from the blob closure) is deferred until a consumer needs it. This
-   also blocks deploying a pulled managed skill (manifest format mismatch —
-   recorded in the M3 validation run).
-2. **M2.2 destructive GC sweep** — design doc landed; implementation
+1. **M2.2 destructive GC sweep** — design doc landed; implementation
    deliberately deferred.
-3. **UI-side local-skill surface** — the WebView pages still use the legacy
-   REST/axios path; Tauri commands (`desktop_login`, `sync_now`, local
-   commit/deploy) are exposed but not yet consumed by React pages.
-4. **PostgreSQL/MySQL migration re-validation** when a server becomes
+2. **PostgreSQL/MySQL migration re-validation** when a server becomes
    available (owner bypassed SQL-server flows, 2026-09-04).
+3. **UI-side local-skill surface (mostly closed 2026-09-07)** — SkillsPage
+   and the new Agent 部署 page now consume deploy/uninstall/discover/prefs/
+   hydrate/sync/conflict commands; local *editing* (create/commit via
+   `commit_local_skill_workspace`) still uses the REST path — acceptable
+   while the server remains the creation authority for typed content.
+4. Trash restore on the desktop currently goes through the REST endpoints
+   (online-only); offline restore would need a new sync mutation type and is
+   deliberately deferred (protocol v1 unchanged).
 
 ## M3 state (2026-09-07)
 

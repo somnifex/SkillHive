@@ -43,6 +43,14 @@ Claude / Codex / Gemini / OpenCode / OpenClaw / custom Agent Skill directories
 
 The branch is ahead of `main` and was not behind `main` at the handoff checkpoint. `main` has intentionally not been modified directly.
 
+As of 2026-09-07 the productization branch `feat/desktop-productization`
+(from `main`) closes the three owner-reported gaps: NSIS installer + desktop
+shell, one-click agent deployment UI (12 built-in targets + custom
+directories + global/per-skill defaults), hydration-then-deploy for pulled
+skills, sync/conflict surfaces, server-side trash lifecycle with admin
+retention, and version tags/rollback/export. See CURRENT_STATUS.md for the
+validation truth and LOCAL_VALIDATION_CHECKLIST.md §42 for the scenario list.
+
 No GitHub Actions workflow is enabled for this development phase.
 
 ---
@@ -59,11 +67,11 @@ No GitHub Actions workflow is enabled for this development phase.
 | M2.2 Package/blob storage | CODE COMPLETE | #7 | Storage/transport implemented and locally validated; GC design doc landed (`docs/development/GC_DESIGN.md`), destructive sweep deferred by design |
 | M2.3 Device identity/credentials | CODE COMPLETE | #8 | Server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
 | M2.4 Idempotent push | CODE COMPLETE (desktop) | #9 | Push endpoint validated live; desktop durable ACK transaction, blob negotiation/upload, push client landed |
-| M2.5 Durable pull/change feed | CODE COMPLETE (desktop) | #10 | Page apply + cursor commit + HTTP pull client + verified blob download landed |
+| M2.5 Durable pull/change feed | CODE COMPLETE (desktop) | #10 | Page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration landed 2026-09-07 (`hydrate_skill`, pulled skills now deployable) |
 | M2.6 Desktop sync orchestrator | CODE COMPLETE (core) | #11 | `SyncEngine::run_cycle` + background triggers landed; WebView commands wired |
 | M2.7 Conflict/reliability checkpoint | CODE COMPLETE (core) | #12 | Conflict query/resolution + 4xx classifier landed; server-side and live client-process scenarios validated 2026-09-06 |
 | M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED | roadmap | Signed entitlement leases shipped in pull metadata; desktop schema-v4 store + pull-apply/startup/post-pull reconciliation; live CDP validation 2026-09-07 (see CURRENT_STATUS.md) |
-| M4 Production hardening | PLANNED | roadmap | Observability, updates, fault testing, release SLO |
+| M4 Production hardening | IN PROGRESS | roadmap | Observability + migration safety landed; NSIS installer packaging landed 2026-09-07 (`bundle.active=true`, zh/en); signed updates + SLO gates still design-only |
 
 `CODE COMPLETE` must not be relabeled `VERIFIED` until the local validation checklist has actually been run.
 

@@ -770,7 +770,41 @@ Known skipped scenarios and why:
 
 Do not write `verified` if mandatory scenarios were skipped.
 
-## 42. Current handoff state
+## 42. Desktop productization scenarios (`feat/desktop-productization`, 2026-09-07)
+
+Mandatory before recording the branch verified:
+
+1. **Agent deploy end to end (desktop)** — create a skill (web or desktop),
+   open 我的 Skills → 部署, pick Claude Code and ZCode targets, install;
+   verify `<target>/skills/<slug>/SKILL.md` exists and the 部署目录 page
+   lists both deployments; uninstall one and confirm the directory is gone.
+2. **Pulled-skill hydration** — from a second client (or server-created
+   skill), sync to the desktop, press 下载到本地 (hydrate), then deploy.
+   Failing this usually means the manifest closure was not local.
+3. **Trash lifecycle** — delete a skill → 回收站 tab shows it with the
+   delete time; restore returns it as draft; purge removes it permanently
+   (check the audit log). Set `trash_retention_days` in admin settings and
+   confirm the sweep purges only entries older than the window (`0` keeps
+   everything until manual purge).
+4. **Version tags/rollback/export** — tag a version, verify a second
+   version cannot claim the same tag (409), rollback mints a NEW patch
+   version with the old content, download-version zip contains SKILL.md.
+5. **Sync chip & conflicts** — 立即同步 in the top bar completes; if a
+   conflict exists, keep-local and keep-remote both resolve and clear the
+   Settings conflict card.
+6. **NSIS installer** — `pnpm tauri build` produces
+   `src-tauri/target/release/bundle/nsis/SkillHive_<version>_x64-setup.exe`;
+   install it, launch, log in against the local server, repeat scenario 1.
+
+Failure modes to watch for:
+
+- deploy fails with `not deployable in state remote_only` — the auto-hydrate
+  hook should have run; check the sync worker logged in and the server is
+  reachable (`hydrate_skill_workspace` needs the bearer token).
+- a custom profile whose directory is a symlink or relative path is rejected
+  by `validate_skill_root` — by design (Rust boundary).
+
+## 43. Current handoff state
 
 At the time this file was created:
 

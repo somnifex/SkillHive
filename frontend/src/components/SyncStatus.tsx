@@ -6,7 +6,10 @@ import { getSyncState, hasDesktopCommands, listConflicts, syncNow } from "../api
 
 function relativeTime(iso: string | null): string {
   if (!iso) return "从未同步";
-  const timestamp = Date.parse(iso);
+  // SQLite CURRENT_TIMESTAMP stores UTC without a timezone suffix; without
+  // the marker Date.parse reads it as local time (an 8h skew on UTC+8).
+  const withZone = /[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  const timestamp = Date.parse(withZone);
   if (Number.isNaN(timestamp)) return "从未同步";
   const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
   if (seconds < 60) return `${seconds} 秒前`;

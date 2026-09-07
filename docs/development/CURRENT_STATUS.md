@@ -155,6 +155,34 @@ verified; frontend lint/typecheck/test/build green; `cargo fmt --check`,
 (includes hydration + deployment-prefs suites). PostgreSQL/MySQL re-validation
 remains bypassed per owner instruction.
 
+### Live end-to-end validation (2026-09-08, local server + release client)
+
+Ran the full product loop against `uvicorn` (SQLite, port 8000) and the
+built `skillhive-desktop.exe`, driven through the GUI:
+
+- **Fixed during testing (3 real bugs):** desktop WebView CORS preflight
+  rejected (`http://tauri.localhost` missing from `cors_origins`); sync
+  device never registered because `desktop_login` had no UI caller (login
+  page now registers the device + triggers an immediate cycle; logout clears
+  keyring); server camelCase manifests (`blobHash`/`sizeBytes`) rejected by
+  the desktop snapshot reader so pulled skills could never hydrate/deploy
+  (manifest deserializes both spellings now, unit-tested); sync chip showed
+  "8 hours ago" on UTC+8 (SQLite CURRENT_TIMESTAMP parsed as local time).
+- **Verified live:** register + login (web session + device registration);
+  skill creation from the UI; pull landing the skill locally (`remote_only`);
+  hydration ("下载到本地" → `remote_only`→`synced`, workspace + SKILL.md
+  materialized); **one-click deploy to both `~/.zcode/skills/literature-review`
+  and `~/.codex/skills/literature-review` with correct SKILL.md content**;
+  Agent 部署 page (12 adapters discovered per directory presence, enable
+  toggles, deployment table showing both targets 已安装); trash lifecycle
+  (delete → trash tab with delete-time → restore as draft → strong-confirm
+  purge → 404); version tags (stable on 0.1.0, 409 on tag clash), rollback
+  (mints 0.1.1 "回滚自 0.1.0"), per-version zip export (SKILL.md inside).
+- Sync worker cycles healthy throughout (ok, 72-98ms per cycle).
+- Remaining known cosmetic: session loss on WebView reload (access-token
+  expiry drops the web session while keyring credentials persist) — user
+  re-logs in; recording as known issue.
+
 ## Current milestone state
 
 | Milestone | Current state |

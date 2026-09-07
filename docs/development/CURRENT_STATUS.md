@@ -46,6 +46,55 @@ import/export. Design of record:
   S3 storage → 3 login server address → 4 zip import/export. Update this
   section as each phase lands.
 
+### Landed 2026-09-07 (all phases, commits `027088b` → `dc94566`)
+
+- **Group tree** (`41dd0ad` + `af768df`): `groups.parent_id` self-reference
+  (migration `e8f1a2b3c4d5`), effective-role resolution via recursive CTE
+  (ancestor owner/admin grants admin on descendants; owner-only operations
+  stay local; global admins act as implicit tree root), depth limit 16,
+  cycle rejection, `GROUP_HAS_CHILDREN` dissolve guard, `POST /groups`
+  with `parent_group_id`, `PATCH /groups/{id}` reparenting, `GET /groups/tree`;
+  frontend tree table with parent column, sub-group creation, breadcrumbs.
+  Skill grants deliberately do NOT inherit down the tree (design §2.3).
+- **Admin console + storage** (`bdc47c9` + `b758c78`): `system_settings`
+  table (migration `f7a8b9c0d1e2`), `S3BlobStorage` behind a
+  `RoutedBlobStorage` facade (writes to the active backend, reads fall back
+  across configured backends; a switch takes effect on the next operation
+  without a restart), `/admin/system/settings` GET/PATCH with env-only S3
+  credentials, registration toggle, user lifecycle (create / password reset
+  with session revocation / guarded soft delete), `GET /admin/groups/tree`,
+  and the AdminPage surfaces (users, group tree, system settings).
+- **Server address** (`12d9be3`): login/register pages gain a server
+  address field with a live test; web persists in localStorage with a
+  dynamic axios base URL; desktop persists in Rust (`server.json`, atomic
+  write, validated, env fallback) via `get/set_server_url` commands,
+  `SyncClient` managed through a runtime-replaceable `SyncClientHandle`
+  shared by commands and the sync worker; keyring credentials are
+  namespaced per server (SHA-256 prefix) — existing desktop installs
+  re-login once.
+- **Zip packaging** (`dc94566`): desktop-only import/export through native
+  dialogs opened in Rust (WebView never submits paths); import validates
+  entry names/sizes, reuses the full snapshot capture policy and queues the
+  create mutation through the standard commit path; export materializes the
+  verified snapshot from the blob store. Server and sync protocol untouched
+  (D1).
+
+Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
+
+- backend: `uv run ruff check backend` clean; `uv run mypy backend/app
+  backend/tests` clean (strict, 86 files); `uv run pytest backend/tests` →
+  **130 passed**; Alembic fresh → head (`f7a8b9c0d1e2`) and staged upgrades
+  `c4d5e6f7a8b9 → e8f1a2b3c4d5 → f7a8b9c0d1e2` with legacy data intact,
+  `ck_groups_parent_not_self` enforced.
+- frontend: `pnpm lint/typecheck/test/build` all green.
+- desktop: `cargo test --lib` → **107 passed**; `cargo clippy -D warnings`
+  and `cargo fmt --check` clean.
+- Known flake (pre-existing, also on clean tree): see the
+  `telemetry::tests::events_append_json_lines` note in
+  `LOCAL_VALIDATION_CHECKLIST.md` §1.
+- PostgreSQL/MySQL migration re-validation still bypassed per owner
+  instruction (no server available) — unchanged from the standing record.
+
 ## Current milestone state
 
 | Milestone | Current state |

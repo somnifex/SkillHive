@@ -23,9 +23,9 @@ import hashlib
 import os
 import tempfile
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from pathlib import Path
-from pathlib import Path
-from typing import Any, BinaryIO, Protocol, Sequence
+from typing import Any, BinaryIO, Protocol
 
 from sqlalchemy.orm import Session
 

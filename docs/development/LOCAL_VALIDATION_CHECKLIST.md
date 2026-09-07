@@ -23,6 +23,17 @@ Read `AGENTS.md` and `LOCAL_AGENT_HANDOFF.md` first.
 - A passing fresh install does not validate an upgrade migration. Test both.
 - PR #3 has already been merged. The active continuation branch is now `feat/m2-sync`.
 
+### Known flaky check (pre-existing, recorded 2026-09-07)
+
+- `telemetry::tests::events_append_json_lines` (cargo) fails intermittently
+  under full-suite parallel execution (observed ~1 in 3 runs, reproduced on a
+  clean tree without the group-tree branch). Root cause: `telemetry::init`
+  sets a process-global `LOG_PATH`; two tests calling `init` concurrently
+  race and the assertion reads the other test's file. It passes reliably in
+  isolation (`cargo test --lib telemetry::`). Any fix should serialize the
+  telemetry tests or make the log path injectable per-logger — do not weaken
+  the assertions.
+
 ---
 
 # PART A — TOOLCHAIN BASELINE

@@ -2,12 +2,43 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from "axios";
 
 import { useAuthStore } from "../stores/auth";
 import type { TokenResponse } from "../types";
+import { isDesktop, resolveApiBase, setStoredServerUrl } from "./server";
 
 export const api = axios.create({
-  baseURL: "/api/v1",
+  baseURL: resolveApiBase(),
   withCredentials: true,
   timeout: 15000,
 });
+
+interface TauriGlobal {
+  core?: {
+    invoke?: (command: string, args?: unknown) => Promise<unknown>;
+  };
+}
+
+/**
+ * Persists the backend address and re-points every API call. On the desktop
+ * the address is mirrored into the Rust-side config so the sync engine and
+ * the webview talk to the same server; the web build just stores it locally.
+ */
+export function setServerUrl(raw: string): void {
+  const normalized = raw.trim().replace(/\/+$/, "");
+  setStoredServerUrl(normalized);
+  api.defaults.baseURL = resolveApiBase();
+  if (isDesktop() && normalized) {
+    const global = window as unknown as { __TAURI__?: TauriGlobal };
+    const invoke = global.__TAURI__?.core?.invoke;
+    if (invoke) {
+      void invoke("set_server_url", { request: { baseUrl: normalized } }).catch(
+        () => undefined,
+      );
+    }
+  }
+}
+
+export function currentServerUrl(): string {
+  return resolveApiBase().replace(/\/api\/v1$/, "");
+}
 
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const token = useAuthStore.getState().accessToken;
@@ -33,7 +64,7 @@ api.interceptors.response.use(
     }
     original._retry = true;
     refreshing ??= axios
-      .post<TokenResponse>("/api/v1/auth/refresh", undefined, {
+      .post<TokenResponse>(`${resolveApiBase()}/auth/refresh`, undefined, {
         withCredentials: true,
       })
       .then(({ data }) => {

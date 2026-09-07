@@ -1,6 +1,7 @@
 import axios from "axios";
 import { create } from "zustand";
 
+import { resolveApiBase } from "../api/server";
 import type { TokenResponse, User } from "../types";
 
 interface AuthState {
@@ -26,7 +27,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   bootstrap: async () => {
     try {
       const { data } = await axios.post<TokenResponse>(
-        "/api/v1/auth/refresh",
+        `${resolveApiBase()}/auth/refresh`,
         undefined,
         { withCredentials: true },
       );

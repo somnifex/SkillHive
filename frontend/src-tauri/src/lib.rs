@@ -4,6 +4,7 @@ pub mod cache_manager;
 pub mod credentials;
 pub mod deployment;
 pub mod local_store;
+pub mod server_config;
 pub mod skill_snapshot;
 pub mod snapshot_verifier;
 pub mod sync;
@@ -43,6 +44,36 @@ use workspace::{WorkspaceRef, WorkspaceStore};
 #[derive(Debug, Default)]
 pub struct DesktopMutationCoordinator {
     lock: Mutex<()>,
+}
+
+/// Runtime-replaceable sync client: the UI can point the app at a different
+/// server without restarting. The background worker resolves the handle on
+/// every cycle, so a swap takes effect on the next wake.
+#[derive(Clone)]
+pub struct SyncClientHandle {
+    inner: Arc<std::sync::RwLock<Arc<SyncClient>>>,
+}
+
+impl SyncClientHandle {
+    pub fn new(client: SyncClient) -> Self {
+        Self {
+            inner: Arc::new(std::sync::RwLock::new(Arc::new(client))),
+        }
+    }
+
+    pub fn get(&self) -> Arc<SyncClient> {
+        self.inner
+            .read()
+            .expect("sync client handle lock poisoned")
+            .clone()
+    }
+
+    pub fn replace(&self, client: SyncClient) {
+        *self
+            .inner
+            .write()
+            .expect("sync client handle lock poisoned") = Arc::new(client);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -531,7 +562,7 @@ pub struct DesktopLoginResult {
 #[tauri::command]
 fn desktop_login(
     coordinator: tauri::State<'_, DesktopMutationCoordinator>,
-    client: tauri::State<'_, SyncClient>,
+    client: tauri::State<'_, SyncClientHandle>,
     store: tauri::State<'_, LocalStore>,
     request: DesktopLoginRequest,
 ) -> Result<DesktopLoginResult, String> {
@@ -550,6 +581,7 @@ fn desktop_login(
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
     let session = client
+        .get()
         .login(&request.username, &request.password, &registration)
         .map_err(|error| error.to_string())?;
     store
@@ -572,21 +604,65 @@ fn desktop_login(
 #[tauri::command]
 fn desktop_logout(
     coordinator: tauri::State<'_, DesktopMutationCoordinator>,
-    client: tauri::State<'_, SyncClient>,
+    client: tauri::State<'_, SyncClientHandle>,
 ) -> Result<(), String> {
     let _guard = coordinator
         .lock
         .lock()
         .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
     client
+        .get()
         .clear_credentials()
         .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerUrlState {
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerUrlUpdate {
+    pub base_url: String,
+}
+
+#[tauri::command]
+fn get_server_url(client: tauri::State<'_, SyncClientHandle>) -> ServerUrlState {
+    ServerUrlState {
+        base_url: client.get().base_url().to_owned(),
+    }
+}
+
+#[tauri::command]
+fn set_server_url(
+    app: tauri::AppHandle,
+    handle: tauri::State<'_, SyncClientHandle>,
+    request: ServerUrlUpdate,
+) -> Result<ServerUrlState, String> {
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?;
+    let normalized =
+        server_config::store(&data_dir, &request.base_url).map_err(|error| error.to_string())?;
+    let client = SyncClient::new(&normalized).map_err(|error| error.to_string())?;
+    handle.replace(client);
+    // The worker resolves the handle per cycle; poke it so a queued retry
+    // picks up the new server without waiting for the heartbeat.
+    if let Some(worker) = app.try_state::<SyncWorkerHandle>() {
+        worker.request_sync();
+    }
+    Ok(ServerUrlState {
+        base_url: normalized,
+    })
 }
 
 #[tauri::command]
 fn sync_now(
     coordinator: tauri::State<'_, DesktopMutationCoordinator>,
-    client: tauri::State<'_, SyncClient>,
+    client: tauri::State<'_, SyncClientHandle>,
     store: tauri::State<'_, LocalStore>,
     blobs: tauri::State<'_, BlobStore>,
 ) -> Result<SyncCycleReport, String> {
@@ -594,6 +670,7 @@ fn sync_now(
         .lock
         .lock()
         .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    let client = client.get();
     SyncEngine
         .run_cycle(&client, &store, &blobs, "SkillHive Desktop")
         .map_err(|error| error.to_string())
@@ -905,12 +982,10 @@ pub fn run() {
                 Ok(worker_blobs) => worker_blobs,
                 Err(error) => return Err(error.into()),
             };
-            let worker_client = SyncClient::new(
-                &std::env::var("SKILLHIVE_SERVER_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
-            )?;
+            let server_url = server_config::load(&data_dir);
+            let client_handle = SyncClientHandle::new(SyncClient::new(&server_url)?);
             let sync_handle = spawn_sync_worker(
-                Arc::new(worker_client),
+                client_handle.clone(),
                 Arc::new(worker_store),
                 Arc::new(worker_blobs),
                 "SkillHive Desktop",
@@ -918,10 +993,7 @@ pub fn run() {
 
             app.manage(store);
             app.manage(blobs);
-            app.manage(SyncClient::new(
-                &std::env::var("SKILLHIVE_SERVER_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
-            )?);
+            app.manage(client_handle);
             app.manage(workspaces);
             app.manage(deployment);
             app.manage(uninstall);
@@ -988,6 +1060,8 @@ pub fn run() {
             desktop_startup_status,
             desktop_login,
             desktop_logout,
+            get_server_url,
+            set_server_url,
             sync_now,
             sync_state,
             list_conflicts,

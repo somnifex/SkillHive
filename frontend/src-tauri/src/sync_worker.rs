@@ -25,6 +25,7 @@ use crate::blob_store::BlobStore;
 use crate::local_store::LocalStore;
 use crate::sync::{SyncCycleError, SyncEngine};
 use crate::sync_client::SyncClient;
+use crate::SyncClientHandle;
 
 /// Periodic heartbeat: catches persisted backoffs that expire between
 /// event triggers. Long by design — correctness never depends on it.
@@ -71,7 +72,7 @@ impl SyncWorkerHandle {
 /// startup recovery has finished. The returned handle lets the UI path
 /// trigger immediate cycles on local commits.
 pub fn spawn_sync_worker(
-    client: Arc<SyncClient>,
+    client: SyncClientHandle,
     store: Arc<LocalStore>,
     blobs: Arc<BlobStore>,
     device_display_name: &'static str,
@@ -91,14 +92,20 @@ pub fn spawn_sync_worker(
 
 fn worker_loop(
     waker: Arc<SyncWaker>,
-    client: &SyncClient,
+    client: &SyncClientHandle,
     store: &LocalStore,
     blobs: &BlobStore,
     device_display_name: &str,
 ) {
     // Startup trigger: one early cycle after setup settles.
     std::thread::sleep(STARTUP_DELAY);
-    run_worker_cycle(waker.as_ref(), client, store, blobs, device_display_name);
+    run_worker_cycle(
+        waker.as_ref(),
+        &client.get(),
+        store,
+        blobs,
+        device_display_name,
+    );
 
     loop {
         // Heartbeat park: slow by design. Pokes only shorten the wait by
@@ -109,7 +116,15 @@ fn worker_loop(
             let mut state = waker.state.lock().expect("sync waker lock poisoned");
             state.pending_pokes = 0;
         }
-        run_worker_cycle(waker.as_ref(), client, store, blobs, device_display_name);
+        // Resolved per cycle so a server-address swap takes effect on the
+        // next wake without a restart.
+        run_worker_cycle(
+            waker.as_ref(),
+            &client.get(),
+            store,
+            blobs,
+            device_display_name,
+        );
     }
 }
 

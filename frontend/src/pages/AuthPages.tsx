@@ -5,12 +5,15 @@ import {
   Info,
   LockKeyhole,
   Mail,
+  Server,
   UserRound,
 } from "lucide-react";
-import { App, Button, Card, Form, Input } from "antd";
+import { App, Button, Card, Form, Input, Space } from "antd";
+import { useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 
-import { api, errorMessage } from "../api/client";
+import { api, currentServerUrl, errorMessage, setServerUrl } from "../api/client";
+import { isDesktop, normalizeServerUrl, pingServer } from "../api/server";
 import { BrandLogo } from "../components/BrandLogo";
 import { useAuthStore } from "../stores/auth";
 import type { TokenResponse, User } from "../types";
@@ -18,6 +21,53 @@ import type { TokenResponse, User } from "../types";
 interface LoginValues {
   username: string;
   password: string;
+}
+
+/**
+ * Server address control shown on the auth screens. The backend is an
+ * independently deployed service, so the client points at it explicitly;
+ * on the web the default stays same-origin, on the desktop the default is
+ * the local development server.
+ */
+function ServerAddressField() {
+  const { message } = App.useApp();
+  const [value, setValue] = useState(currentServerUrl());
+  const [testing, setTesting] = useState(false);
+
+  const test = async () => {
+    setTesting(true);
+    try {
+      setServerUrl(value);
+      await pingServer(value);
+      const target = normalizeServerUrl(value);
+      message.success(target ? `已连接：${target}` : "已连接到同源部署");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "连接失败");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <Form.Item
+      label="服务端地址"
+      extra="服务端与客户端分离部署时可指向其他地址；留空使用同源。"
+    >
+      <Space.Compact style={{ width: "100%" }}>
+        <Input
+          value={value}
+          placeholder={isDesktop() ? "http://127.0.0.1:8000" : "同源部署（可留空）"}
+          onChange={(event) => setValue(event.target.value)}
+          onBlur={() => setServerUrl(value)}
+          prefix={<Server size={18} strokeWidth={1.7} aria-hidden="true" />}
+          autoComplete="url"
+        />
+        <Button onClick={test} loading={testing}>
+          测试
+        </Button>
+      </Space.Compact>
+    </Form.Item>
+  );
 }
 
 function AuthArtwork({ mode }: { mode: "login" | "register" }) {
@@ -80,6 +130,7 @@ export function LoginPage() {
             <p>继续管理你的 Skills 与团队空间</p>
           </div>
           <Form form={form} layout="vertical" size="large" onFinish={submit}>
+            <ServerAddressField />
             <Form.Item
               label="用户名或邮箱"
               name="username"
@@ -166,6 +217,7 @@ export function RegisterPage() {
             <p>建立你的私人 Skill 空间</p>
           </div>
           <Form layout="vertical" size="large" onFinish={submit}>
+            <ServerAddressField />
             <Form.Item
               label="用户名"
               name="username"

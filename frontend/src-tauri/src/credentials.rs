@@ -11,6 +11,7 @@
 //! unavailable" without string matching.
 
 use keyring::Entry;
+use sha2::{Digest, Sha256};
 
 /// Default service identifier under which credentials are stored.
 pub const DEFAULT_SERVICE: &str = "app.skillhive.desktop";
@@ -18,6 +19,23 @@ pub const DEFAULT_SERVICE: &str = "app.skillhive.desktop";
 /// The account (user) a stored secret belongs to.
 pub const ACCOUNT_ACCESS_TOKEN: &str = "access-token";
 pub const ACCOUNT_REFRESH_TOKEN: &str = "refresh-token";
+
+/// Credential service name scoped to one server address.
+///
+/// Tokens must never be replayed against a different server than the one
+/// that issued them, so each configured server address gets its own
+/// namespace. The address itself never lands in the OS credential store
+/// (privacy); only a short SHA-256 prefix does.
+pub fn service_for_server(base_url: &str) -> String {
+    let normalized = base_url.trim().trim_end_matches('/').to_lowercase();
+    let digest = Sha256::digest(normalized.as_bytes());
+    let prefix: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{DEFAULT_SERVICE}:{prefix}")
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialStoreError {
@@ -115,6 +133,17 @@ mod tests {
 
     fn test_service() -> String {
         format!("app.skillhive.test.{}", uuid::Uuid::new_v4())
+    }
+
+    #[test]
+    fn server_namespaces_are_stable_and_distinct() {
+        let first = service_for_server("http://127.0.0.1:8000");
+        let same = service_for_server("http://127.0.0.1:8000/");
+        let other = service_for_server("https://skillhive.example.com");
+        assert_eq!(first, same, "trailing slash must not change the namespace");
+        assert_ne!(first, other);
+        assert!(first.starts_with(DEFAULT_SERVICE));
+        assert!(!first.contains("127.0.0.1"), "raw address must not leak");
     }
 
     #[test]

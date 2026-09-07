@@ -21,7 +21,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::{
-    CredentialStore, CredentialStoreError, ACCOUNT_ACCESS_TOKEN, ACCOUNT_REFRESH_TOKEN,
+    service_for_server, CredentialStore, CredentialStoreError, ACCOUNT_ACCESS_TOKEN,
+    ACCOUNT_REFRESH_TOKEN,
 };
 
 const REFRESH_COOKIE_NAME: &str = "skillhive_refresh";
@@ -145,6 +146,9 @@ impl DeviceRegistration {
 /// in this struct is ever serialized to the WebView.
 pub struct SyncClient {
     base_url: String,
+    /// Credential namespace bound to this client's server address so tokens
+    /// are never replayed against a different server.
+    credentials: CredentialStore,
     http: reqwest::blocking::Client,
     /// M4: correlation ID attached to every authenticated request until
     /// cleared. The sync engine sets it once per cycle so all of a cycle's
@@ -161,6 +165,7 @@ impl SyncClient {
             .map_err(|error| SyncClientError::Network(error.to_string()))?;
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
+            credentials: CredentialStore::new(service_for_server(base_url)),
             http,
             correlation_id: std::sync::Mutex::new(None),
         })
@@ -231,7 +236,7 @@ impl SyncClient {
     /// Called by the sync worker before each cycle; a failure here never
     /// touches outbox mutation state.
     pub fn ensure_access_token(&self) -> Result<String, SyncClientError> {
-        let refresh = CredentialStore::default().get_secret(ACCOUNT_REFRESH_TOKEN)?;
+        let refresh = self.credentials.get_secret(ACCOUNT_REFRESH_TOKEN)?;
         let response = self
             .http
             .post(format!("{}/api/v1/auth/refresh", self.base_url))
@@ -266,9 +271,8 @@ impl SyncClient {
 
     /// Remove stored secrets (logout). Idempotent.
     pub fn clear_credentials(&self) -> Result<(), SyncClientError> {
-        let store = CredentialStore::default();
-        store.delete_secret(ACCOUNT_REFRESH_TOKEN)?;
-        store.delete_secret(ACCOUNT_ACCESS_TOKEN)?;
+        self.credentials.delete_secret(ACCOUNT_REFRESH_TOKEN)?;
+        self.credentials.delete_secret(ACCOUNT_ACCESS_TOKEN)?;
         Ok(())
     }
 
@@ -379,7 +383,8 @@ impl SyncClient {
     }
 
     fn store_refresh(&self, refresh_token: &str) -> Result<(), SyncClientError> {
-        CredentialStore::default().set_secret(ACCOUNT_REFRESH_TOKEN, refresh_token)?;
+        self.credentials
+            .set_secret(ACCOUNT_REFRESH_TOKEN, refresh_token)?;
         Ok(())
     }
 }

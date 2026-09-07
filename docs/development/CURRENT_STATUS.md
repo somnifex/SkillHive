@@ -43,15 +43,18 @@ It was forked from `feat/m2-sync` after that branch was aligned with latest `mai
 | M2.6 Desktop sync orchestrator (#11) | CODE COMPLETE (desktop) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake landed (`sync_worker.rs`) and validated live |
 | M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (desktop) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side AND live client-process scenarios validated 2026-09-06 (see validation truth)** |
 | M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED — grant offline policy (migration `c4d5e6f7a8b9`), signed JWT entitlement leases shipped in pull metadata, desktop schema-v4 entitlement store, pull-apply + startup + post-pull reconciliation landed (`b2165a7`, `b5be325`, `97fe35e`, `bef5977`); **live CDP scenarios validated 2026-09-07 (see validation truth)** |
-| M4 Production hardening | PLANNED |
+| M4 Production hardening | IN PROGRESS — observability + migration safety landed (commits `0d0fba4`, `1b0b2c5`, `210af26`, `bf64a8f`; see M4 state below). Remaining: fault-injection test package, signed release/update process (design-only), release SLO gates doc |
 
 ## Exact next task
 
-Continue on branch `feat/m2-continue`. M3 is now code complete AND
-live-validated (see validation truth below). The next milestone is **M4
-(production hardening)**: structured logs/correlation IDs, metrics,
-migration backup/safe startup, fault-injection tests, signed release
-process. Remaining M2 gaps stay record-only:
+Continue on branch `feat/m2-continue`. M4 is in progress: the
+observability + migration-safety packages landed (see M4 state below).
+The remaining M4 work is the **fault-injection test package** (network
+loss / crash / duplicate / 5xx / auth-change / disk-full — mostly
+already covered live; needs pytest+cargo home in one recorded
+checklist), the **signed release/update process** (design-only given the
+local-only constraint), and the **release SLO/correctness gates** doc.
+Remaining M2 gaps stay record-only:
 
 1. **Workspaces/hydration polish (M2.5 leftover)** — pulled `remote_only`
    records carry metadata + manifest only; workspace hydration (materialize
@@ -107,6 +110,69 @@ Validation truth: backend `uv run python -m pytest backend/tests` →
 strict → clean; `cargo test --lib` → 91 passed (6 entitlement + 3
 pull-apply entitlement tests); `cargo clippy -D warnings` and
 `cargo fmt --check` → clean.
+
+## M4 state (2026-09-07)
+
+Landed (commits `0d0fba4`, `1b0b2c5`, `210af26`, `bf64a8f`):
+
+**Backend observability (`0d0fba4`)**
+- `app/core/observability.py`: pure-ASGI `X-Request-ID` middleware —
+  echoes the caller-supplied ID (desktop sends its per-cycle ID; capped
+  at 128 chars) or generates one, appends it to every response
+  *including handler-generated error envelopes*, stamps a context var
+  read by a logging filter, and emits one structured access-log line per
+  request (method/path/status/duration only — never tokens, query
+  strings, or bodies). AppError/HTTPException handlers log their error
+  codes for metrics.
+- `app/services/sync_trim.py`: bounded change-log/receipt trim jobs
+  completing the GC work package (GC_DESIGN.md §6 + §10 item 1). The
+  410 `SYNC_CURSOR_EXPIRED` check was already live and keys off the
+  trimmed oldest sequence. Bounded per invocation; repeated runs
+  converge.
+- Real bug found and fixed: `migrations/env.py` called `fileConfig` with
+  the default `disable_existing_loggers=True`, which flipped every
+  pre-existing `app.*` logger to `disabled=True` for the rest of the
+  process after any in-process alembic run (silently swallowing all
+  later logs; found by the new observability tests in full-suite runs).
+  Now `disable_existing_loggers=False`.
+- Real bug found and fixed: `test_entitlements.py` anchored lease tests
+  at a fixed 2026-09-06 timestamp; the ttl-8h token expired ~2h of real
+  clock later, making the JWT layer reject the token as expired instead
+  of testing policy math. Now anchored at the real wall clock.
+
+**Desktop telemetry + correlation (`1b0b2c5`, `bf64a8f`)**
+- `telemetry.rs`: dependency-free JSON-line event log at
+  `<app data>/logs/skillhive.log` (5 MB rollover to `.old`). Failure-
+  tolerant by contract — log writes never break sync paths — and
+  redaction-safe: callers pass explicit field slices (identifiers and
+  counts only).
+- `SyncEngine::run_cycle` generates one correlation ID per cycle, sends
+  it as `X-Request-ID` through all four authenticated request methods in
+  `sync_client.rs`, and emits `sync_cycle_begin`/`sync_cycle_end` (with
+  outcome counters and duration). Mutation-dispatch failures and
+  entitlement expirations emit their own events (IDs only). Startup
+  emits `startup_begin`/`startup_complete` with recovery counts, and
+  deployment-journal recovery emits `deployment_recovery`.
+
+**Desktop migration safety (`210af26`)**
+- `LocalStore::open` snapshots the DB to `<db>.sqlite3.pre-migration`
+  (`VACUUM INTO` — consistent, compacted, WAL-safe) whenever a migration
+  is pending. Steps remain transactional; the backup covers
+  non-transactional failure modes (disk-full during checkpointing, torn
+  pages, kill between steps). `migration_start`/`migration_done`/
+  `migration_backup` telemetry events included.
+
+Validation truth: backend `uv run python -m pytest backend/tests` →
+120 passed (8 observability + 5 trim tests included); `uv run mypy
+backend/app backend/tests` strict → clean; `uv run ruff check backend`
+→ clean; `cargo test --lib` → 95 passed; `cargo clippy -D warnings` and
+`cargo fmt --check` → clean.
+
+M4 remaining (explicit): fault-injection test package (much is already
+live-validated 2026-09-06; needs one recorded pytest+cargo checklist
+mapped to the roadmap reliability matrix), signed release/update
+process (design-only given local-only constraint), release SLO gates
+doc.
 
 ### Validated 2026-09-07 (live desktop M3 entitlement leases, CDP harness)
 

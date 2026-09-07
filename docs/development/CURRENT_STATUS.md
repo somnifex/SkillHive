@@ -27,6 +27,25 @@ dcedf9a fix(sync): make M2.1 baseline pass local backend validation
 
 It was forked from `feat/m2-sync` after that branch was aligned with latest `main` (merge b9c7257). Treat `feat/m2-continue` as the current continuation branch.
 
+## Group tree / admin console feature branch (2026-09-07)
+
+The owner approved a new feature package (plan-approval round, 2026-09-07):
+tree-nested groups with permission inheritance, a system-admin console
+(storage backend selection local/S3, user lifecycle, platform parameters),
+a user-configurable server address on the login screen, and client-side zip
+import/export. Design of record:
+`docs/architecture/group-tree-and-admin-console.md`.
+
+- Branch: **`feat/group-tree-admin`**, forked from `main` (`6f4c604`) via a
+  separate worktree (`../SkillHive-group-tree`) because
+  `feat/wanhua-ui-revamp` carries uncommitted UI work that must not mix in.
+- Known limitation: `origin` is SSH-only and unreachable from the current
+  environment, so the fork point is the local `origin/main` ref; re-fetch and
+  rebase before opening a PR.
+- Phases: 0 design doc → 1 group tree (backend+frontend) → 2 admin console +
+  S3 storage → 3 login server address → 4 zip import/export. Update this
+  section as each phase lands.
+
 ## Current milestone state
 
 | Milestone | Current state |

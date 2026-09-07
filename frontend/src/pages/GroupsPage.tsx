@@ -32,10 +32,16 @@ interface GroupRow extends Group {
   children?: GroupRow[];
 }
 
-const ROLE_TAGS: Record<string, { label: string; color: string }> = {
+const roleLabels: Record<string, { label: string; color: string }> = {
   owner: { label: "群主", color: "gold" },
   admin: { label: "管理员", color: "blue" },
   member: { label: "成员", color: "default" },
+};
+
+const joinPolicyLabels: Record<string, string> = {
+  invite_only: "仅邀请",
+  approval_required: "申请后审批",
+  public: "公开加入",
 };
 
 function buildRows(groups: Group[]): GroupRow[] {
@@ -83,7 +89,10 @@ export function GroupsPage() {
     return managedOnly ? filterManaged(roots) : roots;
   }, [tree.data, managedOnly]);
   const manageables = useMemo(
-    () => (tree.data ?? []).filter((g) => g.current_user_role === "owner" || g.current_user_role === "admin"),
+    () =>
+      (tree.data ?? []).filter(
+        (g) => g.current_user_role === "owner" || g.current_user_role === "admin",
+      ),
     [tree.data],
   );
   const create = useMutation({
@@ -102,12 +111,12 @@ export function GroupsPage() {
   return (
     <>
       <PageHeader
-        title="我的群组"
-        description="管理你加入和负责的协作空间，支持树状子群组。"
+        title="协作群组"
+        description="管理你加入和负责的协作空间。"
         actions={
           <Button
             type="primary"
-            icon={<Plus size={17} aria-hidden="true" />}
+            icon={<Plus size={16} aria-hidden="true" />}
             onClick={() => setOpen(true)}
           >
             创建群组
@@ -116,18 +125,19 @@ export function GroupsPage() {
       />
       <div className="toolbar">
         <span>
-          <Switch checked={managedOnly} onChange={setManagedOnly} /> 仅看我管理的
+          <Switch checked={managedOnly} onChange={setManagedOnly} size="small" /> 仅看我管理的
         </span>
       </div>
       <Table
         rowKey="id"
         loading={tree.isLoading}
         dataSource={rows}
+        expandable={{ indentSize: 28 }}
         locale={{
           emptyText: (
             <Empty
               image={<Users className="empty-icon" aria-hidden="true" />}
-              description="还没有群组"
+              description="还没有群组，创建一个开始团队协作"
             />
           ),
         }}
@@ -135,14 +145,13 @@ export function GroupsPage() {
           onClick: () => navigate(`/groups/${record.id}`),
           className: "clickable-row",
         })}
-        expandable={{ indentSize: 28 }}
         columns={[
           {
             title: "群组",
             render: (_: unknown, record: GroupRow) => (
               <div className="group-name">
                 <div className="group-icon">
-                  <Users size={19} strokeWidth={1.6} aria-hidden="true" />
+                  <Users size={18} strokeWidth={1.7} aria-hidden="true" />
                 </div>
                 <div>
                   <Typography.Text strong>{record.name}</Typography.Text>
@@ -157,8 +166,8 @@ export function GroupsPage() {
             title: "我的角色",
             dataIndex: "current_user_role",
             render: (role: string) => {
-              const tag = ROLE_TAGS[role];
-              return tag ? <Tag color={tag.color}>{tag.label}</Tag> : <Tag>{role}</Tag>;
+              const meta = roleLabels[role];
+              return meta ? <Tag color={meta.color}>{meta.label}</Tag> : (role ?? "—");
             },
           },
           {
@@ -166,8 +175,16 @@ export function GroupsPage() {
             dataIndex: "parent_name",
             render: (parentName: string | null) => parentName ?? "—",
           },
-          { title: "加入策略", dataIndex: "join_policy" },
-          { title: "状态", dataIndex: "status" },
+          {
+            title: "加入策略",
+            dataIndex: "join_policy",
+            render: (policy: string) => joinPolicyLabels[policy] ?? policy,
+          },
+          {
+            title: "状态",
+            dataIndex: "status",
+            render: (v: string) => (v === "active" ? "正常" : v),
+          },
         ]}
       />
       <Modal
@@ -206,11 +223,10 @@ export function GroupsPage() {
           </Form.Item>
           <Form.Item name="join_policy" label="加入策略">
             <Select
-              options={[
-                { value: "invite_only", label: "仅邀请" },
-                { value: "approval_required", label: "申请后审批" },
-                { value: "public", label: "公开加入" },
-              ]}
+              options={Object.entries(joinPolicyLabels).map(([value, label]) => ({
+                value,
+                label,
+              }))}
             />
           </Form.Item>
           <Form.Item

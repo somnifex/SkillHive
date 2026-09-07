@@ -25,6 +25,18 @@ import { PageHeader } from "../components/PageHeader";
 import { useAuthStore } from "../stores/auth";
 import type { Grant, Group, Member, Skill, SkillVersion } from "../types";
 
+const joinPolicyLabels: Record<string, string> = {
+  invite_only: "仅邀请",
+  approval_required: "申请后审批",
+  public: "公开加入",
+};
+
+const roleLabels: Record<string, string> = {
+  owner: "群主",
+  admin: "管理员",
+  member: "成员",
+};
+
 export function GroupDetailPage() {
   const { groupId = "" } = useParams();
   const navigate = useNavigate();
@@ -77,6 +89,7 @@ export function GroupDetailPage() {
     queryClient.invalidateQueries({ queryKey: ["group-members", groupId] });
     queryClient.invalidateQueries({ queryKey: ["group-grants", groupId] });
     queryClient.invalidateQueries({ queryKey: ["groups"] });
+    queryClient.invalidateQueries({ queryKey: ["groups-tree"] });
   };
   const invite = useMutation({
     mutationFn: (values: { identity: string }) =>
@@ -182,8 +195,9 @@ export function GroupDetailPage() {
     <>
       <Button
         type="text"
-        icon={<ArrowLeft size={17} aria-hidden="true" />}
+        icon={<ArrowLeft size={16} aria-hidden="true" />}
         onClick={() => navigate("/groups")}
+        style={{ marginBottom: 8 }}
       >
         返回群组
       </Button>
@@ -192,9 +206,7 @@ export function GroupDetailPage() {
           className="group-breadcrumb"
           items={[
             ...group.data!.ancestors.map((ancestor) => ({
-              title: (
-                <a onClick={() => navigate(`/groups/${ancestor.id}`)}>{ancestor.name}</a>
-              ),
+              title: <a onClick={() => navigate(`/groups/${ancestor.id}`)}>{ancestor.name}</a>,
             })),
             { title: group.data?.name },
           ]}
@@ -207,7 +219,7 @@ export function GroupDetailPage() {
           <>
             {isManager && (
               <Button
-                icon={<Plus size={17} aria-hidden="true" />}
+                icon={<Plus size={16} aria-hidden="true" />}
                 onClick={() => setSubgroupOpen(true)}
               >
                 新建子群组
@@ -215,7 +227,7 @@ export function GroupDetailPage() {
             )}
             {isManager && (
               <Button
-                icon={<Settings size={17} aria-hidden="true" />}
+                icon={<Settings size={16} aria-hidden="true" />}
                 onClick={() => {
                   settingsForm.setFieldsValue(group.data);
                   setSettingsOpen(true);
@@ -240,12 +252,8 @@ export function GroupDetailPage() {
             children: (
               <Descriptions bordered column={2}>
                 <Descriptions.Item label="我的角色">
-                  <Tag color={group.data?.current_user_role === "owner" ? "gold" : group.data?.current_user_role === "admin" ? "blue" : "default"}>
-                    {group.data?.current_user_role === "owner"
-                      ? "群主"
-                      : group.data?.current_user_role === "admin"
-                        ? "管理员"
-                        : "成员"}
+                  <Tag color={group.data?.current_user_role === "owner" ? "gold" : "blue"}>
+                    {roleLabels[group.data?.current_user_role ?? ""] ?? "—"}
                   </Tag>
                 </Descriptions.Item>
                 <Descriptions.Item label="上级群组">
@@ -257,8 +265,13 @@ export function GroupDetailPage() {
                     "顶层群组"
                   )}
                 </Descriptions.Item>
-                <Descriptions.Item label="群组类型">{group.data?.group_type}</Descriptions.Item>
-                <Descriptions.Item label="加入策略">{group.data?.join_policy}</Descriptions.Item>
+                <Descriptions.Item label="群组类型">
+                  {group.data?.group_type}
+                </Descriptions.Item>
+                <Descriptions.Item label="加入策略">
+                  {joinPolicyLabels[group.data?.join_policy ?? ""] ??
+                    group.data?.join_policy}
+                </Descriptions.Item>
                 <Descriptions.Item label="成员邀请">
                   {group.data?.allow_member_invite ? "成员可邀请" : "仅管理员"}
                 </Descriptions.Item>
@@ -274,7 +287,7 @@ export function GroupDetailPage() {
                   <div className="tab-actions">
                     <Button
                       type="primary"
-                      icon={<UserPlus size={17} aria-hidden="true" />}
+                      icon={<UserPlus size={16} aria-hidden="true" />}
                       onClick={() => setInviteOpen(true)}
                     >
                       邀请成员
@@ -300,7 +313,15 @@ export function GroupDetailPage() {
                         </div>
                       ),
                     },
-                    { title: "角色", dataIndex: "role", render: (v: string) => <Tag>{v}</Tag> },
+                    {
+                      title: "角色",
+                      dataIndex: "role",
+                      render: (v: string) => (
+                        <Tag color={v === "owner" ? "gold" : v === "admin" ? "blue" : "default"}>
+                          {roleLabels[v] ?? v}
+                        </Tag>
+                      ),
+                    },
                     {
                       title: "操作",
                       render: (_: unknown, member: Member) =>
@@ -340,7 +361,7 @@ export function GroupDetailPage() {
                   <div className="tab-actions">
                     <Button
                       type="primary"
-                      icon={<Plus size={17} aria-hidden="true" />}
+                      icon={<Plus size={16} aria-hidden="true" />}
                       onClick={() => setSkillOpen(true)}
                     >
                       启用全局 Skill
@@ -356,7 +377,12 @@ export function GroupDetailPage() {
                         title: "Skill",
                         render: (_: unknown, grant: Grant) => grant.skill?.name,
                       },
-                      { title: "版本策略", dataIndex: "version_policy" },
+                      {
+                        title: "版本策略",
+                        dataIndex: "version_policy",
+                        render: (v: string) =>
+                          v === "latest" ? "自动跟随最新" : v === "locked" ? "锁定版本" : v,
+                      },
                       {
                         title: "当前版本",
                         render: (_: unknown, grant: Grant) =>
@@ -462,7 +488,7 @@ export function GroupDetailPage() {
           <div className="danger-footer">
             {group.data?.current_user_role === "owner" && (
               <Popconfirm title="确定解散群组？" onConfirm={dissolve}>
-                <Button danger icon={<Trash2 size={17} aria-hidden="true" />}>
+                <Button danger icon={<Trash2 size={16} aria-hidden="true" />}>
                   解散群组
                 </Button>
               </Popconfirm>
@@ -484,11 +510,10 @@ export function GroupDetailPage() {
           {group.data?.current_user_role === "owner" && (
             <Form.Item name="join_policy" label="加入策略">
               <Select
-                options={[
-                  { value: "invite_only", label: "仅邀请" },
-                  { value: "approval_required", label: "申请后审批" },
-                  { value: "public", label: "公开加入" },
-                ]}
+                options={Object.entries(joinPolicyLabels).map(([value, label]) => ({
+                  value,
+                  label,
+                }))}
               />
             </Form.Item>
           )}

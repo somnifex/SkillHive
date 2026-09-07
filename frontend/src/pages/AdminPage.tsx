@@ -32,14 +32,6 @@ interface GlobalSkillForm {
   instructions: string;
 }
 
-interface UserForm {
-  username: string;
-  display_name: string;
-  email: string;
-  password: string;
-  is_global_admin: boolean;
-}
-
 interface SettingsFormValues {
   blob_storage_backend: "local" | "s3";
   s3_endpoint_url?: string | null;
@@ -79,7 +71,13 @@ export function AdminPage() {
   const [userOpen, setUserOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<User | null>(null);
   const [form] = Form.useForm<GlobalSkillForm>();
-  const [userForm] = Form.useForm<UserForm>();
+  const [userForm] = Form.useForm<{
+    username: string;
+    display_name: string;
+    email: string;
+    password: string;
+    is_global_admin: boolean;
+  }>();
   const [resetForm] = Form.useForm<{ new_password: string }>();
   const users = useQuery({
     queryKey: ["admin-users"],
@@ -89,6 +87,7 @@ export function AdminPage() {
     queryKey: ["admin-group-tree"],
     queryFn: () => api.get<Group[]>("/admin/groups/tree").then((r) => r.data),
   });
+  const groupRows = useMemo(() => buildGroupRows(groupTree.data ?? []), [groupTree.data]);
   const skills = useQuery({
     queryKey: ["admin-skills"],
     queryFn: () => api.get<Page<Skill>>("/admin/skills").then((r) => r.data),
@@ -101,7 +100,6 @@ export function AdminPage() {
     queryKey: ["admin-system-settings"],
     queryFn: () => api.get<SystemSettings>("/admin/system/settings").then((r) => r.data),
   });
-  const groupRows = useMemo(() => buildGroupRows(groupTree.data ?? []), [groupTree.data]);
   const createSkill = useMutation({
     mutationFn: (values: GlobalSkillForm) =>
       api.post("/admin/skills", {
@@ -207,7 +205,7 @@ export function AdminPage() {
     <>
       <PageHeader
         title="管理后台"
-        description="管理平台用户、群组树、全局 Skills、系统设置和审计记录。"
+        description="管理平台用户、群组、全局 Skills 和审计记录。"
       />
       <Tabs
         items={[
@@ -219,7 +217,7 @@ export function AdminPage() {
                 <div className="tab-actions">
                   <Button
                     type="primary"
-                    icon={<Plus size={17} aria-hidden="true" />}
+                    icon={<Plus size={16} aria-hidden="true" />}
                     onClick={() => setUserOpen(true)}
                   >
                     创建用户
@@ -245,23 +243,26 @@ export function AdminPage() {
                     {
                       title: "角色",
                       render: (_: unknown, user: User) =>
-                        user.is_global_admin ? <Tag color="gold">全局管理员</Tag> : <Tag>用户</Tag>,
+                        user.is_global_admin ? (
+                          <Tag color="gold">全局管理员</Tag>
+                        ) : (
+                          <Tag>用户</Tag>
+                        ),
                     },
                     {
                       title: "状态",
                       dataIndex: "status",
                       render: (status: string) => (
-                        <Tag color={status === "active" ? "geekblue" : "red"}>{status}</Tag>
+                        <Tag color={status === "active" ? "green" : "red"}>
+                          {status === "active" ? "正常" : "已禁用"}
+                        </Tag>
                       ),
                     },
                     {
                       title: "操作",
                       render: (_: unknown, user: User) => (
                         <Space>
-                          <Button
-                            size="small"
-                            onClick={() => setResetTarget(user)}
-                          >
+                          <Button size="small" onClick={() => setResetTarget(user)}>
                             重置密码
                           </Button>
                           {!user.is_global_admin && (
@@ -312,15 +313,20 @@ export function AdminPage() {
                   {
                     title: "状态",
                     dataIndex: "status",
-                    render: (status: string) => (
-                      <Tag color={status === "active" ? "geekblue" : "orange"}>{status}</Tag>
+                    render: (v: string) => (
+                      <Tag color={v === "active" ? "green" : "warning"}>
+                        {v === "active" ? "正常" : v}
+                      </Tag>
                     ),
                   },
                   {
                     title: "操作",
                     render: (_: unknown, group: Group) =>
                       group.status === "active" ? (
-                        <Popconfirm title="归档该群组？" onConfirm={() => setGroupStatus(group, "archived")}>
+                        <Popconfirm
+                          title="归档该群组？"
+                          onConfirm={() => setGroupStatus(group, "archived")}
+                        >
                           <Button size="small" danger>
                             归档
                           </Button>
@@ -352,7 +358,6 @@ export function AdminPage() {
                 )}
                 <Form
                   key={settings.data ? "loaded" : "loading"}
-                  form={undefined}
                   layout="vertical"
                   initialValues={settings.data ?? undefined}
                   onFinish={(values: SettingsFormValues) => saveSettings.mutate(values)}
@@ -409,7 +414,7 @@ export function AdminPage() {
                 <div className="tab-actions">
                   <Button
                     type="primary"
-                    icon={<Plus size={17} aria-hidden="true" />}
+                    icon={<Plus size={16} aria-hidden="true" />}
                     onClick={() => setSkillOpen(true)}
                   >
                     创建全局 Skill
@@ -430,11 +435,29 @@ export function AdminPage() {
                         </div>
                       ),
                     },
-                    { title: "分类", dataIndex: "category" },
+                    { title: "分类", dataIndex: "category", render: (v: string) => v || "—" },
                     {
                       title: "状态",
                       dataIndex: "status",
-                      render: (status: string) => <Tag>{status}</Tag>,
+                      render: (status: string) => (
+                        <Tag
+                          color={
+                            status === "published"
+                              ? "green"
+                              : status === "draft"
+                                ? "default"
+                                : "warning"
+                          }
+                        >
+                          {status === "published"
+                            ? "已发布"
+                            : status === "draft"
+                              ? "草稿"
+                              : status === "disabled"
+                                ? "已停用"
+                                : status}
+                        </Tag>
+                      ),
                     },
                     {
                       title: "操作",
@@ -474,7 +497,9 @@ export function AdminPage() {
                     title: "结果",
                     dataIndex: "result",
                     render: (result: string) => (
-                      <Tag color={result === "success" ? "blue" : "red"}>{result}</Tag>
+                      <Tag color={result === "success" ? "green" : "red"}>
+                        {result === "success" ? "成功" : result}
+                      </Tag>
                     ),
                   },
                   {
@@ -555,11 +580,7 @@ export function AdminPage() {
           <Form.Item name="email" label="邮箱" rules={[{ required: true, type: "email" }]}>
             <Input />
           </Form.Item>
-          <Form.Item
-            name="password"
-            label="初始密码"
-            rules={[{ required: true, min: 8 }]}
-          >
+          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8 }]}>
             <Input.Password />
           </Form.Item>
           <Form.Item name="is_global_admin" label="设为全局管理员" valuePropName="checked">

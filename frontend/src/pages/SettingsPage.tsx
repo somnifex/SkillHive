@@ -29,7 +29,7 @@ export function SettingsPage() {
       <div className="settings-grid">
         <Card title="账号资料">
           <div className="profile-heading">
-            <Avatar size={64}>{user?.display_name.slice(0, 1)}</Avatar>
+            <Avatar size={60}>{user?.display_name.slice(0, 1)}</Avatar>
             <div>
               <Typography.Title level={4}>{user?.display_name}</Typography.Title>
               <Typography.Text type="secondary">@{user?.username}</Typography.Text>
@@ -56,36 +56,38 @@ export function SettingsPage() {
         </Card>
         <Card title="修改密码">
           <Form layout="vertical" onFinish={(values) => password.mutate(values)}>
-            <Form.Item
-              name="current_password"
-              label="当前密码"
-              rules={[{ required: true }]}
-            >
-              <Input.Password
-                iconRender={(visible) =>
-                  visible ? (
-                    <EyeOff size={17} strokeWidth={1.7} aria-hidden="true" />
-                  ) : (
-                    <Eye size={17} strokeWidth={1.7} aria-hidden="true" />
-                  )
-                }
-              />
-            </Form.Item>
-            <Form.Item
-              name="new_password"
-              label="新密码"
-              rules={[{ required: true }, { min: 8 }]}
-            >
-              <Input.Password
-                iconRender={(visible) =>
-                  visible ? (
-                    <EyeOff size={17} strokeWidth={1.7} aria-hidden="true" />
-                  ) : (
-                    <Eye size={17} strokeWidth={1.7} aria-hidden="true" />
-                  )
-                }
-              />
-            </Form.Item>
+            <div className="form-grid">
+              <Form.Item
+                name="current_password"
+                label="当前密码"
+                rules={[{ required: true }]}
+              >
+                <Input.Password
+                  iconRender={(visible) =>
+                    visible ? (
+                      <EyeOff size={16} strokeWidth={1.7} aria-hidden="true" />
+                    ) : (
+                      <Eye size={16} strokeWidth={1.7} aria-hidden="true" />
+                    )
+                  }
+                />
+              </Form.Item>
+              <Form.Item
+                name="new_password"
+                label="新密码"
+                rules={[{ required: true }, { min: 8 }]}
+              >
+                <Input.Password
+                  iconRender={(visible) =>
+                    visible ? (
+                      <EyeOff size={16} strokeWidth={1.7} aria-hidden="true" />
+                    ) : (
+                      <Eye size={16} strokeWidth={1.7} aria-hidden="true" />
+                    )
+                  }
+                />
+              </Form.Item>
+            </div>
             <Button type="primary" htmlType="submit" loading={password.isPending}>
               更新密码
             </Button>

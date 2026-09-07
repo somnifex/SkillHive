@@ -2,7 +2,6 @@ import {
   Blocks,
   BookOpen,
   ChevronDown,
-  CircleGauge,
   FileText,
   Home,
   LogOut,
@@ -14,7 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import { Avatar, Button, Drawer, Dropdown, Layout } from "antd";
-import { useEffect, useState, type PointerEvent } from "react";
+import { useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
@@ -23,21 +22,24 @@ import { useAppearanceStore, useAuthStore } from "../stores/auth";
 
 const { Header, Sider, Content } = Layout;
 
-const coreNavigation = [
-  { key: "/", icon: Home, label: "总览", code: "01" },
-  { key: "/skills", icon: BookOpen, label: "我的 Skills", code: "02" },
-  { key: "/templates", icon: FileText, label: "模板档案", code: "03" },
-  { key: "/groups", icon: Users, label: "协作群组", code: "04" },
-  { key: "/group-skills", icon: Blocks, label: "群组 Skills", code: "05" },
+const workNavigation = [
+  { key: "/", icon: Home, label: "工作台" },
+  { key: "/skills", icon: BookOpen, label: "我的 Skills" },
+  { key: "/templates", icon: FileText, label: "模板库" },
+];
+
+const teamNavigation = [
+  { key: "/groups", icon: Users, label: "协作群组" },
+  { key: "/group-skills", icon: Blocks, label: "群组 Skills" },
 ];
 
 const routeTitles: Record<string, string> = {
-  "/": "能力总览",
-  "/skills": "私人能力库",
-  "/templates": "模板档案",
+  "/": "工作台",
+  "/skills": "我的 Skills",
+  "/templates": "模板库",
   "/groups": "协作群组",
-  "/group-skills": "群组能力",
-  "/admin": "系统控制",
+  "/group-skills": "群组 Skills",
+  "/admin": "管理后台",
   "/settings": "个人设置",
 };
 
@@ -55,13 +57,6 @@ export function AppLayout() {
       (path) => location.pathname.startsWith(path),
     ) ?? "/";
 
-  const navigation = [
-    ...coreNavigation,
-    ...(user?.is_global_admin
-      ? [{ key: "/admin", icon: ShieldCheck, label: "系统控制", code: "06" }]
-      : []),
-  ];
-
   const go = (path: string) => {
     navigate(path);
     setMobileOpen(false);
@@ -76,67 +71,93 @@ export function AppLayout() {
     }
   };
 
-  const trackPointer = (event: PointerEvent<HTMLElement>) => {
-    event.currentTarget.style.setProperty("--pointer-x", `${event.clientX}px`);
-    event.currentTarget.style.setProperty("--pointer-y", `${event.clientY}px`);
-  };
-
-  useEffect(() => {
-    document.getElementById("main-content")?.focus({ preventScroll: true });
-  }, [location.pathname]);
-
   const nav = (
-    <nav className="nav-rail" aria-label="主要导航">
-      {navigation.map(({ key, icon: Icon, label, code }) => (
-        <button
-          key={key}
-          type="button"
-          className={`nav-item${selected === key ? " is-active" : ""}`}
-          aria-current={selected === key ? "page" : undefined}
-          onClick={() => go(key)}
-        >
-          <span className="nav-index">{code}</span>
-          <Icon size={19} strokeWidth={1.7} aria-hidden="true" />
-          <span>{label}</span>
-        </button>
-      ))}
+    <nav aria-label="主导航">
+      <div className="nav-group-label">工作台</div>
+      <div className="nav-rail">
+        {workNavigation.map(({ key, icon: Icon, label }) => (
+          <button
+            key={key}
+            type="button"
+            className={`nav-item${selected === key ? " is-active" : ""}`}
+            aria-current={selected === key ? "page" : undefined}
+            onClick={() => go(key)}
+          >
+            <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
+            <span>{label}</span>
+          </button>
+        ))}
+      </div>
+      <div className="nav-group-label">协作</div>
+      <div className="nav-rail">
+        {teamNavigation.map(({ key, icon: Icon, label }) => (
+          <button
+            key={key}
+            type="button"
+            className={`nav-item${selected === key ? " is-active" : ""}`}
+            aria-current={selected === key ? "page" : undefined}
+            onClick={() => go(key)}
+          >
+            <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
+            <span>{label}</span>
+          </button>
+        ))}
+        {user?.is_global_admin && (
+          <button
+            type="button"
+            className={`nav-item${selected === "/admin" ? " is-active" : ""}`}
+            aria-current={selected === "/admin" ? "page" : undefined}
+            onClick={() => go("/admin")}
+          >
+            <ShieldCheck size={18} strokeWidth={1.8} aria-hidden="true" />
+            <span>管理后台</span>
+          </button>
+        )}
+      </div>
     </nav>
   );
 
   return (
-    <Layout className="app-shell" onPointerMove={trackPointer}>
+    <Layout className="app-shell">
       <a className="skip-link" href="#main-content">
         跳到主要内容
       </a>
-      <div className="ambient-field" aria-hidden="true">
-        <div className="ambient-grid" />
-        <div className="ambient-glow" />
-      </div>
 
-      <Sider width={254} className="sidebar">
+      <Sider width={232} className="sidebar">
         <button type="button" className="brand brand-button" onClick={() => go("/")}>
           <BrandLogo />
           <span className="brand-copy">
             <strong>SkillHive</strong>
-            <small>ABILITY OPERATING SYSTEM</small>
+            <small>团队 Skills 平台</small>
           </span>
         </button>
 
-        <div className="rail-label">导航 / INDEX</div>
-        {nav}
+        <div className="nav-group">{nav}</div>
 
         <div className="rail-footer">
-          <div className="system-pulse">
-            <span />
-            <div>
-              <strong>系统在线</strong>
-              <small>所有节点运行正常</small>
+          <div className="rail-user">
+            <Avatar size={34}>
+              {user?.display_name?.slice(0, 1).toUpperCase()}
+            </Avatar>
+            <div className="rail-user-meta">
+              <strong>{user?.display_name}</strong>
+              <small>
+                {user?.is_global_admin ? "全局管理员" : "普通用户"}
+              </small>
             </div>
           </div>
-          <button type="button" className="nav-item settings-link" onClick={() => go("/settings")}>
-            <span className="nav-index">OS</span>
-            <Settings size={19} strokeWidth={1.7} aria-hidden="true" />
+          <button
+            type="button"
+            className="nav-item"
+            onClick={() => go("/settings")}
+            aria-current={selected === "/settings" ? "page" : undefined}
+          >
+            <Settings size={18} strokeWidth={1.8} aria-hidden="true" />
             <span>个人设置</span>
+          </button>
+          <button type="button" className="nav-item" onClick={logout}>
+            <LogOut size={18} strokeWidth={1.8} aria-hidden="true" />
+            <span>退出登录</span>
           </button>
         </div>
       </Sider>
@@ -152,24 +173,20 @@ export function AppLayout() {
               onClick={() => setMobileOpen(true)}
             />
             <div className="route-context">
-              <span>SKILLHIVE / {selected === "/" ? "HOME" : selected.slice(1).toUpperCase()}</span>
-              <strong>{routeTitles[selected]}</strong>
+              <span>SKILLHIVE</span>
+              <strong>{routeTitles[selected] ?? "工作台"}</strong>
             </div>
           </div>
           <div className="top-actions">
-            <div className="live-indicator">
-              <CircleGauge size={15} aria-hidden="true" />
-              <span>LIVE</span>
-            </div>
             <Button
               type="text"
               className="icon-button"
-              aria-label="切换主题"
+              aria-label="切换深色模式"
               icon={
                 dark ? (
-                  <Sun size={19} strokeWidth={1.7} aria-hidden="true" />
+                  <Sun size={18} strokeWidth={1.8} aria-hidden="true" />
                 ) : (
-                  <Moon size={19} strokeWidth={1.7} aria-hidden="true" />
+                  <Moon size={18} strokeWidth={1.8} aria-hidden="true" />
                 )
               }
               onClick={toggleTheme}
@@ -180,13 +197,13 @@ export function AppLayout() {
                 items: [
                   {
                     key: "settings",
-                    icon: <Settings size={17} aria-hidden="true" />,
+                    icon: <Settings size={16} aria-hidden="true" />,
                     label: "个人设置",
                     onClick: () => navigate("/settings"),
                   },
                   {
                     key: "logout",
-                    icon: <LogOut size={17} aria-hidden="true" />,
+                    icon: <LogOut size={16} aria-hidden="true" />,
                     label: "退出登录",
                     onClick: logout,
                   },
@@ -194,11 +211,11 @@ export function AppLayout() {
               }}
             >
               <Button type="text" className="account-button">
-                <Avatar size={32} className="account-avatar">
+                <Avatar size={30} className="account-avatar">
                   {user?.display_name?.slice(0, 1).toUpperCase()}
                 </Avatar>
                 <span className="account-name">{user?.display_name}</span>
-                <ChevronDown size={15} aria-hidden="true" />
+                <ChevronDown size={14} aria-hidden="true" />
               </Button>
             </Dropdown>
           </div>
@@ -215,7 +232,7 @@ export function AppLayout() {
         open={mobileOpen}
         onClose={() => setMobileOpen(false)}
         placement="left"
-        width="min(340px, 88vw)"
+        width="min(320px, 86vw)"
         className="mobile-drawer"
         title={
           <div className="drawer-brand">
@@ -225,11 +242,6 @@ export function AppLayout() {
         }
       >
         {nav}
-        <button type="button" className="nav-item settings-link" onClick={() => go("/settings")}>
-          <span className="nav-index">OS</span>
-          <Settings size={19} aria-hidden="true" />
-          <span>个人设置</span>
-        </button>
       </Drawer>
     </Layout>
   );

@@ -8,7 +8,7 @@ import {
   Server,
   UserRound,
 } from "lucide-react";
-import { App, Button, Card, Form, Input, Space } from "antd";
+import { App, Button, Form, Input, Space } from "antd";
 import { useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 
@@ -21,6 +21,63 @@ import type { TokenResponse, User } from "../types";
 interface LoginValues {
   username: string;
   password: string;
+}
+
+interface RegisterValues {
+  username: string;
+  display_name: string;
+  email: string;
+  password: string;
+}
+
+function AuthSide({ mode }: { mode: "login" | "register" }) {
+  return (
+    <aside className="auth-side">
+      <div className="auth-wordmark">
+        <BrandLogo decorative />
+        <div className="brand-copy">
+          <strong>SkillHive</strong>
+          <small>团队 Skills 平台</small>
+        </div>
+      </div>
+      <div className="auth-side-copy">
+        <h1 className="auth-headline">
+          {mode === "login"
+            ? "让团队经验\n沉淀为可复用的能力"
+            : "从一份方法开始\n构建团队能力库"}
+        </h1>
+        <p className="auth-tagline">
+          {mode === "login"
+            ? "登录 SkillHive，继续沉淀、共享与部署团队的最佳实践。"
+            : "创建账号，建立你的私人 Skill 空间，并在清晰的边界内与团队协作。"}
+        </p>
+        <ul className="auth-points">
+          <li>版本化保存每一次能力更新</li>
+          <li>群组共享与全局技能统一管理</li>
+          <li>一键部署到本地 Agent 工作区</li>
+        </ul>
+        <p className="auth-side-meta">化学，让生活更美好 · BETTER CHEMISTRY, BETTER LIFE</p>
+      </div>
+    </aside>
+  );
+}
+
+function PasswordInput(
+  props: Parameters<typeof Input.Password>[0] & { autoComplete?: string },
+) {
+  return (
+    <Input.Password
+      {...props}
+      prefix={<LockKeyhole size={17} strokeWidth={1.7} aria-hidden="true" />}
+      iconRender={(visible) =>
+        visible ? (
+          <EyeOff size={16} strokeWidth={1.7} aria-hidden="true" />
+        ) : (
+          <Eye size={16} strokeWidth={1.7} aria-hidden="true" />
+        )
+      }
+    />
+  );
 }
 
 /**
@@ -59,7 +116,7 @@ function ServerAddressField() {
           placeholder={isDesktop() ? "http://127.0.0.1:8000" : "同源部署（可留空）"}
           onChange={(event) => setValue(event.target.value)}
           onBlur={() => setServerUrl(value)}
-          prefix={<Server size={18} strokeWidth={1.7} aria-hidden="true" />}
+          prefix={<Server size={17} strokeWidth={1.7} aria-hidden="true" />}
           autoComplete="url"
         />
         <Button onClick={test} loading={testing}>
@@ -67,34 +124,6 @@ function ServerAddressField() {
         </Button>
       </Space.Compact>
     </Form.Item>
-  );
-}
-
-function AuthArtwork({ mode }: { mode: "login" | "register" }) {
-  return (
-    <aside className="auth-artwork">
-      <img
-        src="/art/skillhive-orbit.png"
-        alt=""
-        width={1672}
-        height={941}
-        fetchPriority="high"
-      />
-      <div className="auth-artwork-shade" />
-      <div className="auth-artwork-copy">
-        <span>SKILLHIVE / ABILITY OS</span>
-        <h1>{mode === "login" ? "知识不是库存，\n而是流动。" : "从一个方法，\n开始构建系统。"}</h1>
-        <p>
-          {mode === "login"
-            ? "捕捉方法。连接团队。让每一次工作都留下可复用的能力。"
-            : "创建你的私人能力空间，并在清晰的边界内与团队共同演化。"}
-        </p>
-      </div>
-      <div className="auth-coordinates">
-        <span>22.3193° N</span>
-        <span>114.1694° E</span>
-      </div>
-    </aside>
   );
 }
 
@@ -120,16 +149,15 @@ export function LoginPage() {
 
   return (
     <div className="auth-page">
-      <AuthArtwork mode="login" />
-      <main className="auth-panel">
-        <Card className="auth-card" variant="borderless">
-          <div className="auth-brand">
-            <BrandLogo className="brand-logo-auth" />
-            <span>WELCOME BACK / 01</span>
+      <AuthSide mode="login" />
+      <main className="auth-main">
+        <section className="auth-card">
+          <div className="auth-head">
+            <BrandLogo />
             <h2>登录 SkillHive</h2>
             <p>继续管理你的 Skills 与团队空间</p>
           </div>
-          <Form form={form} layout="vertical" size="large" onFinish={submit}>
+          <Form form={form} layout="vertical" onFinish={submit}>
             <ServerAddressField />
             <Form.Item
               label="用户名或邮箱"
@@ -137,7 +165,7 @@ export function LoginPage() {
               rules={[{ required: true, message: "请输入用户名或邮箱" }]}
             >
               <Input
-                prefix={<UserRound size={18} strokeWidth={1.7} aria-hidden="true" />}
+                prefix={<UserRound size={17} strokeWidth={1.7} aria-hidden="true" />}
                 autoComplete="username"
               />
             </Form.Item>
@@ -146,46 +174,23 @@ export function LoginPage() {
               name="password"
               rules={[{ required: true, message: "请输入密码" }]}
             >
-              <Input.Password
-                prefix={<LockKeyhole size={18} strokeWidth={1.7} aria-hidden="true" />}
-                iconRender={(visible) =>
-                  visible ? (
-                    <EyeOff size={17} strokeWidth={1.7} aria-hidden="true" />
-                  ) : (
-                    <Eye size={17} strokeWidth={1.7} aria-hidden="true" />
-                  )
-                }
-                autoComplete="current-password"
-              />
+              <PasswordInput autoComplete="current-password" />
             </Form.Item>
-            <Button
-              type="primary"
-              htmlType="submit"
-              block
-              icon={<ArrowRight size={18} aria-hidden="true" />}
-              iconPlacement="end"
-            >
+            <Button type="primary" htmlType="submit" block icon={<ArrowRight size={16} aria-hidden="true" />}>
               登录
             </Button>
           </Form>
           <div className="dev-account">
-            <Info size={16} aria-hidden="true" />
+            <Info size={15} aria-hidden="true" />
             <span>开发账号：admin / Admin123!，howie / User123!</span>
           </div>
           <p className="auth-switch">
             还没有账号？ <Link to="/register">创建账号</Link>
           </p>
-        </Card>
+        </section>
       </main>
     </div>
   );
-}
-
-interface RegisterValues {
-  username: string;
-  display_name: string;
-  email: string;
-  password: string;
 }
 
 export function RegisterPage() {
@@ -207,23 +212,22 @@ export function RegisterPage() {
 
   return (
     <div className="auth-page">
-      <AuthArtwork mode="register" />
-      <main className="auth-panel">
-        <Card className="auth-card" variant="borderless">
-          <div className="auth-brand">
-            <BrandLogo className="brand-logo-auth" />
-            <span>NEW IDENTITY / 02</span>
+      <AuthSide mode="register" />
+      <main className="auth-main">
+        <section className="auth-card">
+          <div className="auth-head">
+            <BrandLogo />
             <h2>创建账号</h2>
             <p>建立你的私人 Skill 空间</p>
           </div>
-          <Form layout="vertical" size="large" onFinish={submit}>
+          <Form layout="vertical" onFinish={submit}>
             <ServerAddressField />
             <Form.Item
               label="用户名"
               name="username"
               rules={[{ required: true }, { min: 3 }]}
             >
-              <Input prefix={<UserRound size={18} strokeWidth={1.7} aria-hidden="true" />} />
+              <Input prefix={<UserRound size={17} strokeWidth={1.7} aria-hidden="true" />} />
             </Form.Item>
             <Form.Item
               label="显示名称"
@@ -237,7 +241,7 @@ export function RegisterPage() {
               name="email"
               rules={[{ required: true }, { type: "email" }]}
             >
-              <Input prefix={<Mail size={18} strokeWidth={1.7} aria-hidden="true" />} />
+              <Input prefix={<Mail size={17} strokeWidth={1.7} aria-hidden="true" />} />
             </Form.Item>
             <Form.Item
               label="密码"
@@ -245,24 +249,14 @@ export function RegisterPage() {
               extra="至少 8 位，包含大小写字母和数字"
               rules={[{ required: true }, { min: 8 }]}
             >
-              <Input.Password
-                prefix={<LockKeyhole size={18} strokeWidth={1.7} aria-hidden="true" />}
-                iconRender={(visible) =>
-                  visible ? (
-                    <EyeOff size={17} strokeWidth={1.7} aria-hidden="true" />
-                  ) : (
-                    <Eye size={17} strokeWidth={1.7} aria-hidden="true" />
-                  )
-                }
-              />
+              <PasswordInput />
             </Form.Item>
             <div className="auth-form-actions">
               <Button
                 type="primary"
                 htmlType="submit"
                 block
-                icon={<ArrowRight size={18} aria-hidden="true" />}
-                iconPlacement="end"
+                icon={<ArrowRight size={16} aria-hidden="true" />}
               >
                 创建账号
               </Button>
@@ -271,7 +265,7 @@ export function RegisterPage() {
               </Button>
             </div>
           </Form>
-        </Card>
+        </section>
       </main>
     </div>
   );

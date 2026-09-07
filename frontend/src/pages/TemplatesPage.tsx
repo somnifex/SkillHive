@@ -46,9 +46,15 @@ interface InstantiateFormValues {
 
 const scopeMeta = {
   personal: { label: "个人", color: "blue" },
-  group: { label: "群组", color: "purple" },
+  group: { label: "群组", color: "cyan" },
   global: { label: "全局", color: "gold" },
 } as const;
+
+const templateStatusLabels: Record<string, string> = {
+  published: "已发布",
+  draft: "草稿",
+  disabled: "已停用",
+};
 
 export function TemplatesPage() {
   const { message } = App.useApp();
@@ -183,12 +189,12 @@ export function TemplatesPage() {
   return (
     <>
       <PageHeader
-        title="Skill 模板库"
+        title="模板库"
         description="从个人、群组或全局模板快速创建属于你的私人 Skill。"
         actions={
           <Button
             type="primary"
-            icon={<Plus size={17} aria-hidden="true" />}
+            icon={<Plus size={16} aria-hidden="true" />}
             onClick={openCreate}
           >
             添加模板
@@ -199,7 +205,7 @@ export function TemplatesPage() {
         className="template-format-alert"
         type="info"
         showIcon
-        icon={<Info size={18} strokeWidth={1.7} aria-hidden="true" />}
+        icon={<Info size={17} strokeWidth={1.7} aria-hidden="true" />}
         message="OpenAI 推荐格式"
         description="默认模板以 SKILL.md 为入口，生成包含 name、description 前置信息和清晰工作流的 Skill。"
       />
@@ -207,7 +213,7 @@ export function TemplatesPage() {
         <Input
           allowClear
           placeholder="搜索模板名称或用途"
-          prefix={<Search size={17} strokeWidth={1.7} aria-hidden="true" />}
+          prefix={<Search size={16} strokeWidth={1.7} aria-hidden="true" />}
           onChange={(event) => setSearch(event.target.value)}
           className="search-input"
         />
@@ -216,6 +222,7 @@ export function TemplatesPage() {
           placeholder="全部范围"
           value={scope}
           onChange={setScope}
+          style={{ minWidth: 140 }}
           options={Object.entries(scopeMeta).map(([value, meta]) => ({
             value,
             label: meta.label,
@@ -234,7 +241,7 @@ export function TemplatesPage() {
                 title={
                   <Space wrap>
                     <Typography.Text strong>{template.name}</Typography.Text>
-                    {template.is_default && <Tag color="geekblue">默认</Tag>}
+                    {template.is_default && <Tag color="blue">默认</Tag>}
                   </Space>
                 }
                 extra={
@@ -248,7 +255,7 @@ export function TemplatesPage() {
                   <Button
                     key="use"
                     type="link"
-                    icon={<Rocket size={17} aria-hidden="true" />}
+                    icon={<Rocket size={16} aria-hidden="true" />}
                     onClick={() => openInstantiate(template)}
                   >
                     使用模板
@@ -258,7 +265,7 @@ export function TemplatesPage() {
                         <Button
                           key="edit"
                           type="text"
-                          icon={<Pencil size={17} aria-hidden="true" />}
+                          icon={<Pencil size={16} aria-hidden="true" />}
                           onClick={() => openEdit(template)}
                         >
                           编辑
@@ -273,7 +280,7 @@ export function TemplatesPage() {
                             danger
                             type="text"
                             disabled={template.is_default}
-                            icon={<Trash2 size={17} aria-hidden="true" />}
+                            icon={<Trash2 size={16} aria-hidden="true" />}
                           >
                             删除
                           </Button>
@@ -290,7 +297,9 @@ export function TemplatesPage() {
                   {template.tags.map((tag) => (
                     <Tag key={tag}>{tag}</Tag>
                   ))}
-                  {template.status !== "published" && <Tag>{template.status}</Tag>}
+                  {template.status !== "published" && (
+                    <Tag>{templateStatusLabels[template.status] ?? template.status}</Tag>
+                  )}
                 </div>
               </Card>
             );

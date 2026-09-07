@@ -12,8 +12,15 @@ from app.schemas.skill import (
     SkillUpdate,
     SkillVersionCreate,
     SkillVersionRead,
+    VersionRollbackRequest,
 )
+from app.services.blob_storage import get_blob_storage
+from app.services.legacy_package import synthesize_legacy_package
+from app.services.package_manifest import validate_snapshot_manifest_bytes
 from app.services.skill_mutations import SkillMutationService
+
+# Hard ceiling for in-memory version export; matches the sync package cap.
+MAX_EXPORT_BYTES = 512 * 1024 * 1024
 
 
 class PrivateSkillService:
@@ -150,6 +157,38 @@ class PrivateSkillService:
             )
         )
 
+    def version_by_name(self, skill_id: str, version: str) -> SkillVersionRead:
+        skill = self._owned(skill_id)
+        for row in self.repository.versions(skill.id):
+            if row.version == version:
+                return SkillVersionRead.model_validate(row)
+        raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
+
+    def set_version_tags(self, skill_id: str, version: str, tags: list[str]) -> SkillVersionRead:
+        skill = self._owned(skill_id)
+        row = self.repository.version_by_name(skill.id, version)
+        if row is None:
+            raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
+        updated = self.mutations.set_version_tags(
+            skill, row, tags=tags, audit_action="private_skill.version_tagged"
+        )
+        self.session.commit()
+        return SkillVersionRead.model_validate(updated)
+
+    def rollback(self, skill_id: str, data: VersionRollbackRequest) -> SkillVersionRead:
+        skill = self._owned(skill_id)
+        row = self.repository.version_by_name(skill.id, data.version)
+        if row is None:
+            raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
+        created = self.mutations.rollback_version(
+            skill,
+            row,
+            change_log=data.change_log,
+            audit_action="private_skill.version_rolled_back",
+        )
+        self.session.commit()
+        return SkillVersionRead.model_validate(created)
+
     def delete(self, skill_id: str) -> None:
         skill = self._owned(skill_id)
         self.mutations.soft_delete(skill, audit_action="private_skill.deleted")
@@ -187,6 +226,67 @@ class PrivateSkillService:
             raise AppError("SKILL_NOT_FOUND", "Skill was not found in the trash.", 404)
         self.mutations.purge_skill(skill, audit_action="private_skill.purged")
         self.session.commit()
+
+    def export_version_zip(self, skill_id: str, version: str) -> bytes:
+        """Builds a portable zip archive of one historical version.
+
+        Real packages are re-materialized from the content-addressed blob
+        store after manifest re-validation; legacy content-only versions
+        synthesize their minimal SKILL.md package exactly like the sync pull
+        path, so the archive matches what a desktop would deploy.
+        """
+        import io
+        import zipfile
+
+        skill = self._owned(skill_id)
+        row = self.repository.version_by_name(skill.id, version)
+        if row is None:
+            raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
+
+        storage = get_blob_storage(self.session)
+        manifest_hash = row.package_manifest_hash
+        if manifest_hash is None:
+            manifest_hash = synthesize_legacy_package(
+                self.session,
+                storage,
+                slug=skill.slug,
+                name=skill.name,
+                description=skill.description,
+                content=dict(row.content),
+            )
+        if manifest_hash is None:
+            raise AppError(
+                "VERSION_NOT_EXPORTABLE",
+                "This version has no package content to export.",
+                409,
+            )
+
+        manifest_bytes = storage.open(manifest_hash).read()
+        files = validate_snapshot_manifest_bytes(manifest_bytes)
+        entries: list[tuple[str, bytes]] = []
+        total = 0
+        for entry in files:
+            payload = storage.open(entry["blob_hash"]).read()
+            if len(payload) != entry["size_bytes"]:
+                raise AppError(
+                    "BLOB_SIZE_MISMATCH",
+                    "Stored blob size does not match the manifest.",
+                    500,
+                )
+            total += len(payload)
+            if total > MAX_EXPORT_BYTES:
+                raise AppError(
+                    "EXPORT_TOO_LARGE",
+                    "This version exceeds the export size limit.",
+                    413,
+                )
+            entries.append((entry["path"], payload))
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path, payload in entries:
+                archive.writestr(path, payload)
+        return buffer.getvalue()
 
     def categories(self) -> list[str]:
         return self.repository.private_categories(self.user.id)

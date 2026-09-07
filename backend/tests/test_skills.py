@@ -200,3 +200,67 @@ def test_trash_retention_autopurge_respects_setting(
     db_session.commit()
     assert purge_expired_trash(db_session) == 0
     assert db_session.get(Skill, second_id) is not None
+
+
+def test_version_tags_rollback_and_export(client: TestClient) -> None:
+    headers = auth_header(client, "versions")
+    created = create_skill(client, headers)
+    skill_id = str(created["id"])
+
+    # Create a second version.
+    second = client.post(
+        f"/api/v1/skills/{skill_id}/versions",
+        headers=headers,
+        json={
+            "version": "0.2.0",
+            "content": {"instructions": "Second generation instructions."},
+            "change_log": "bump",
+        },
+    )
+    assert second.status_code == 201
+
+    # Tagging: labels are unique across the skill's versions.
+    tagged = client.put(
+        f"/api/v1/skills/{skill_id}/versions/0.1.0/tags",
+        headers=headers,
+        json={"tags": ["stable", "v1"]},
+    )
+    assert tagged.status_code == 200
+    assert tagged.json()["tags"] == ["stable", "v1"]
+
+    clash = client.put(
+        f"/api/v1/skills/{skill_id}/versions/0.2.0/tags",
+        headers=headers,
+        json={"tags": ["stable"]},
+    )
+    assert clash.status_code == 409
+
+    versions = client.get(f"/api/v1/skills/{skill_id}/versions", headers=headers)
+    tags_by_version = {row["version"]: row["tags"] for row in versions.json()}
+    assert tags_by_version["0.1.0"] == ["stable", "v1"]
+    assert tags_by_version["0.2.0"] == []
+
+    # Rollback mints a NEW version carrying the old content.
+    rolled = client.post(
+        f"/api/v1/skills/{skill_id}/rollback",
+        headers=headers,
+        json={"version": "0.1.0"},
+    )
+    assert rolled.status_code == 201
+    body = rolled.json()
+    assert body["version"] == "0.2.1"
+    assert body["content"]["instructions"] == "Summarize the supplied paper."
+    assert "0.1.0" in body["change_log"]
+    detail = client.get(f"/api/v1/skills/{skill_id}", headers=headers)
+    assert detail.json()["current_version"]["version"] == "0.2.1"
+
+    # Version export returns a zip containing SKILL.md.
+    exported = client.get(f"/api/v1/skills/{skill_id}/versions/0.1.0/export", headers=headers)
+    assert exported.status_code == 200
+    assert exported.headers["content-type"] == "application/zip"
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        names = archive.namelist()
+    assert any(name.endswith("SKILL.md") for name in names)

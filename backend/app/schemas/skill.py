@@ -82,6 +82,9 @@ class SkillVersionCreate(BaseModel):
     dependency_config: dict[str, Any] = Field(default_factory=dict)
     change_log: str = Field(default="", max_length=2000)
     status: Literal["draft", "published"] = "draft"
+    # Docker-style labels; must be unique within one skill (service-enforced).
+    tags: list[str] = Field(default_factory=list, max_length=16)
+
 
     @field_validator("version")
     @classmethod
@@ -89,6 +92,26 @@ class SkillVersionCreate(BaseModel):
         if not SEMVER_RE.fullmatch(value):
             raise ValueError("Version must be a semantic version such as 1.0.0")
         return value
+
+
+class VersionTagsUpdate(BaseModel):
+    """Replaces the tag set of one version (docker-style labels)."""
+
+    tags: list[str] = Field(max_length=16)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for raw in value:
+            tag = raw.strip()
+            if not tag:
+                raise ValueError("Tags must not be empty")
+            if len(tag) > 64:
+                raise ValueError("Tags must be at most 64 characters")
+            if tag not in cleaned:
+                cleaned.append(tag)
+        return cleaned
 
 
 class SkillVersionRead(ORMModel):
@@ -102,9 +125,25 @@ class SkillVersionRead(ORMModel):
     package_size_bytes: int | None
     dependency_config: dict[str, Any]
     change_log: str
+    tags: list[str] = Field(default_factory=list)
     status: str
     created_by: str
     created_at: datetime
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def normalize_tags(cls, value: object) -> list[str]:
+        # Rows written before the migration carry NULL.
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(tag) for tag in value]
+        return []
+
+
+class VersionRollbackRequest(BaseModel):
+    version: str
+    change_log: str = Field(default="", max_length=2000)
 
 
 class SkillRead(ORMModel):

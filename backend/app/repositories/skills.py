@@ -131,6 +131,14 @@ class SkillRepository:
         ).scalars()
         return list(rows)
 
+    def version_by_name(self, skill_id: str, version: str) -> SkillVersion | None:
+        return self.session.scalar(
+            select(SkillVersion).where(
+                SkillVersion.skill_id == skill_id,
+                SkillVersion.version == version,
+            )
+        )
+
     def version(self, version_id: str | None) -> SkillVersion | None:
         return self.session.get(SkillVersion, version_id) if version_id else None
 

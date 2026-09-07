@@ -202,6 +202,9 @@ class SkillVersion(UUIDPrimaryKeyMixin, Base):
     package_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     dependency_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     change_log: Mapped[str] = mapped_column(Text, default="")
+    # Docker-style labels for UIs to pin/switch on. Tag uniqueness inside a
+    # skill is enforced by the service layer, not the DB.
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(

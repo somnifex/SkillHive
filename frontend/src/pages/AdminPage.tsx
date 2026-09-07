@@ -129,13 +129,19 @@ export function AdminPage() {
                   {
                     title: "角色",
                     render: (_: unknown, user: User) =>
-                      user.is_global_admin ? <Tag color="gold">global_admin</Tag> : <Tag>user</Tag>,
+                      user.is_global_admin ? (
+                        <Tag color="gold">全局管理员</Tag>
+                      ) : (
+                        <Tag>用户</Tag>
+                      ),
                   },
                   {
                     title: "状态",
                     dataIndex: "status",
                     render: (status: string) => (
-                      <Tag color={status === "active" ? "geekblue" : "red"}>{status}</Tag>
+                      <Tag color={status === "active" ? "green" : "red"}>
+                        {status === "active" ? "正常" : "已禁用"}
+                      </Tag>
                     ),
                   },
                   {
@@ -168,7 +174,11 @@ export function AdminPage() {
                   { title: "名称", dataIndex: "name" },
                   { title: "类型", dataIndex: "group_type" },
                   { title: "Owner ID", dataIndex: "owner_id" },
-                  { title: "状态", dataIndex: "status" },
+                  {
+                    title: "状态",
+                    dataIndex: "status",
+                    render: (v: string) => (v === "active" ? "正常" : v),
+                  },
                 ]}
               />
             ),
@@ -181,7 +191,7 @@ export function AdminPage() {
                 <div className="tab-actions">
                   <Button
                     type="primary"
-                    icon={<Plus size={17} aria-hidden="true" />}
+                    icon={<Plus size={16} aria-hidden="true" />}
                     onClick={() => setSkillOpen(true)}
                   >
                     创建全局 Skill
@@ -202,11 +212,29 @@ export function AdminPage() {
                         </div>
                       ),
                     },
-                    { title: "分类", dataIndex: "category" },
+                    { title: "分类", dataIndex: "category", render: (v: string) => v || "—" },
                     {
                       title: "状态",
                       dataIndex: "status",
-                      render: (status: string) => <Tag>{status}</Tag>,
+                      render: (status: string) => (
+                        <Tag
+                          color={
+                            status === "published"
+                              ? "green"
+                              : status === "draft"
+                                ? "default"
+                                : "warning"
+                          }
+                        >
+                          {status === "published"
+                            ? "已发布"
+                            : status === "draft"
+                              ? "草稿"
+                              : status === "disabled"
+                                ? "已停用"
+                                : status}
+                        </Tag>
+                      ),
                     },
                     {
                       title: "操作",
@@ -246,7 +274,9 @@ export function AdminPage() {
                     title: "结果",
                     dataIndex: "result",
                     render: (result: string) => (
-                      <Tag color={result === "success" ? "blue" : "red"}>{result}</Tag>
+                      <Tag color={result === "success" ? "green" : "red"}>
+                        {result === "success" ? "成功" : result}
+                      </Tag>
                     ),
                   },
                   {

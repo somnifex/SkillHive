@@ -27,6 +27,18 @@ interface GroupForm {
   allow_member_invite: boolean;
 }
 
+const roleLabels: Record<string, { label: string; color: string }> = {
+  owner: { label: "群主", color: "gold" },
+  admin: { label: "管理员", color: "blue" },
+  member: { label: "成员", color: "default" },
+};
+
+const joinPolicyLabels: Record<string, string> = {
+  invite_only: "仅邀请",
+  approval_required: "申请后审批",
+  public: "公开加入",
+};
+
 export function GroupsPage() {
   const navigate = useNavigate();
   const { message } = App.useApp();
@@ -56,12 +68,12 @@ export function GroupsPage() {
   return (
     <>
       <PageHeader
-        title="我的群组"
+        title="协作群组"
         description="管理你加入和负责的协作空间。"
         actions={
           <Button
             type="primary"
-            icon={<Plus size={17} aria-hidden="true" />}
+            icon={<Plus size={16} aria-hidden="true" />}
             onClick={() => setOpen(true)}
           >
             创建群组
@@ -70,7 +82,7 @@ export function GroupsPage() {
       />
       <div className="toolbar">
         <span>
-          <Switch checked={managedOnly} onChange={setManagedOnly} /> 仅看我管理的
+          <Switch checked={managedOnly} onChange={setManagedOnly} size="small" /> 仅看我管理的
         </span>
       </div>
       <Table
@@ -81,7 +93,7 @@ export function GroupsPage() {
           emptyText: (
             <Empty
               image={<Users className="empty-icon" aria-hidden="true" />}
-              description="还没有群组"
+              description="还没有群组，创建一个开始团队协作"
             />
           ),
         }}
@@ -95,7 +107,7 @@ export function GroupsPage() {
             render: (_: unknown, record: Group) => (
               <div className="group-name">
                 <div className="group-icon">
-                  <Users size={19} strokeWidth={1.6} aria-hidden="true" />
+                  <Users size={18} strokeWidth={1.7} aria-hidden="true" />
                 </div>
                 <div>
                   <Typography.Text strong>{record.name}</Typography.Text>
@@ -109,14 +121,21 @@ export function GroupsPage() {
           {
             title: "我的角色",
             dataIndex: "current_user_role",
-            render: (role: string) => (
-              <Tag color={role === "owner" ? "gold" : role === "admin" ? "blue" : "default"}>
-                {role}
-              </Tag>
-            ),
+            render: (role: string) => {
+              const meta = roleLabels[role];
+              return meta ? <Tag color={meta.color}>{meta.label}</Tag> : (role ?? "—");
+            },
           },
-          { title: "加入策略", dataIndex: "join_policy" },
-          { title: "状态", dataIndex: "status" },
+          {
+            title: "加入策略",
+            dataIndex: "join_policy",
+            render: (policy: string) => joinPolicyLabels[policy] ?? policy,
+          },
+          {
+            title: "状态",
+            dataIndex: "status",
+            render: (v: string) => (v === "active" ? "正常" : v),
+          },
         ]}
       />
       <Modal
@@ -141,11 +160,10 @@ export function GroupsPage() {
           </Form.Item>
           <Form.Item name="join_policy" label="加入策略">
             <Select
-              options={[
-                { value: "invite_only", label: "仅邀请" },
-                { value: "approval_required", label: "申请后审批" },
-                { value: "public", label: "公开加入" },
-              ]}
+              options={Object.entries(joinPolicyLabels).map(([value, label]) => ({
+                value,
+                label,
+              }))}
             />
           </Form.Item>
           <Form.Item

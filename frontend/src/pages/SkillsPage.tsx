@@ -32,6 +32,20 @@ interface SkillFormValues {
   status?: string;
 }
 
+const statusLabels: Record<string, string> = {
+  draft: "草稿",
+  published: "已发布",
+  disabled: "已停用",
+  archived: "已归档",
+};
+
+const statusColors: Record<string, string> = {
+  published: "blue",
+  draft: "default",
+  disabled: "warning",
+  archived: "default",
+};
+
 export function SkillsPage() {
   const { message } = App.useApp();
   const queryClient = useQueryClient();
@@ -144,7 +158,7 @@ export function SkillsPage() {
         actions={
           <Button
             type="primary"
-            icon={<Plus size={17} aria-hidden="true" />}
+            icon={<Plus size={16} aria-hidden="true" />}
             onClick={() => {
               setEditing(null);
               form.resetFields();
@@ -159,7 +173,7 @@ export function SkillsPage() {
         <Input
           allowClear
           placeholder="搜索名称或描述"
-          prefix={<Search size={17} strokeWidth={1.7} aria-hidden="true" />}
+          prefix={<Search size={16} strokeWidth={1.7} aria-hidden="true" />}
           onChange={(event) => setSearch(event.target.value)}
           className="search-input"
         />
@@ -168,9 +182,10 @@ export function SkillsPage() {
           placeholder="全部状态"
           value={status}
           onChange={setStatus}
-          options={["draft", "published", "disabled", "archived"].map((value) => ({
+          style={{ minWidth: 140 }}
+          options={Object.entries(statusLabels).map(([value, label]) => ({
             value,
-            label: value,
+            label,
           }))}
         />
       </div>
@@ -182,7 +197,7 @@ export function SkillsPage() {
           emptyText: (
             <Empty
               image={<PackageOpen className="empty-icon" aria-hidden="true" />}
-              description="还没有 Skill"
+              description="还没有 Skill，点击右上角「创建 Skill」开始沉淀"
             />
           ),
         }}
@@ -211,23 +226,25 @@ export function SkillsPage() {
           {
             title: "标签",
             dataIndex: "tags",
-            render: (tags: string[]) => tags.map((tag) => <Tag key={tag}>{tag}</Tag>),
+            render: (tags: string[]) =>
+              tags.length ? tags.map((tag) => <Tag key={tag}>{tag}</Tag>) : "—",
           },
           {
             title: "状态",
             dataIndex: "status",
             render: (value: string) => (
-              <Tag color={value === "published" ? "geekblue" : "default"}>{value}</Tag>
+              <Tag color={statusColors[value]}>{statusLabels[value] ?? value}</Tag>
             ),
           },
           {
             title: "操作",
+            width: 180,
             render: (_: unknown, record: Skill) => (
               <Space>
                 <Button
                   type="text"
                   aria-label="查看"
-                  icon={<Eye size={17} aria-hidden="true" />}
+                  icon={<Eye size={16} aria-hidden="true" />}
                   onClick={async () => {
                     const { data } = await api.get<Skill>(`/skills/${record.id}`);
                     setDetail(data);
@@ -236,13 +253,13 @@ export function SkillsPage() {
                 <Button
                   type="text"
                   aria-label="编辑"
-                  icon={<Pencil size={17} aria-hidden="true" />}
+                  icon={<Pencil size={16} aria-hidden="true" />}
                   onClick={() => openEdit(record)}
                 />
                 <Button
                   type="text"
-                  aria-label="复制"
-                  icon={<Copy size={17} aria-hidden="true" />}
+                  aria-label="创建副本"
+                  icon={<Copy size={16} aria-hidden="true" />}
                   onClick={() => copy(record)}
                 />
                 <Popconfirm
@@ -254,7 +271,7 @@ export function SkillsPage() {
                     danger
                     type="text"
                     aria-label="删除"
-                    icon={<Trash2 size={17} aria-hidden="true" />}
+                    icon={<Trash2 size={16} aria-hidden="true" />}
                   />
                 </Popconfirm>
               </Space>
@@ -298,8 +315,9 @@ export function SkillsPage() {
           {editing && (
             <Form.Item name="status" label="状态">
               <Select
-                options={["draft", "published", "disabled", "archived"].map((value) => ({
+                options={Object.entries(statusLabels).map(([value, label]) => ({
                   value,
+                  label,
                 }))}
               />
             </Form.Item>
@@ -322,7 +340,7 @@ export function SkillsPage() {
         {detail && (
           <Space direction="vertical" size="large" className="full-width">
             <div>
-              <Tag>{detail.status}</Tag>
+              <Tag color={statusColors[detail.status]}>{statusLabels[detail.status] ?? detail.status}</Tag>
               <Tag>{detail.category || "未分类"}</Tag>
             </div>
             <Typography.Paragraph>{detail.description}</Typography.Paragraph>
@@ -344,7 +362,11 @@ export function SkillsPage() {
                 dataSource={versions.data}
                 columns={[
                   { title: "版本", dataIndex: "version" },
-                  { title: "状态", dataIndex: "status" },
+                  {
+                    title: "状态",
+                    dataIndex: "status",
+                    render: (v: string) => statusLabels[v] ?? v,
+                  },
                   { title: "变更", dataIndex: "change_log" },
                 ]}
               />

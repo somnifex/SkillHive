@@ -63,15 +63,20 @@ export function GroupSkillsPage() {
             },
             {
               title: "分类",
-              render: (_: unknown, grant: Grant) => grant.skill?.category,
+              render: (_: unknown, grant: Grant) => grant.skill?.category || "—",
             },
             {
               title: "版本",
               render: (_: unknown, grant: Grant) => (
-                <Tag>{grant.effective_version?.version}</Tag>
+                <Tag color="blue">{grant.effective_version?.version}</Tag>
               ),
             },
-            { title: "策略", dataIndex: "version_policy" },
+            {
+              title: "策略",
+              dataIndex: "version_policy",
+              render: (v: string) =>
+                v === "latest" ? "自动跟随最新" : v === "locked" ? "锁定版本" : v,
+            },
           ]}
         />
       ) : (

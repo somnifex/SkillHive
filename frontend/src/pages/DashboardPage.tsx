@@ -1,179 +1,190 @@
-import {
-  ArrowRight,
-  ArrowUpRight,
-  Blocks,
-  BookOpen,
-  Plus,
-  Radio,
-  Users,
-} from "lucide-react";
+import { ArrowRight, Blocks, BookOpen, FileText, Plus, Users } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { Button, Empty, Skeleton, Tag, Typography } from "antd";
+import { Button, Empty, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import { useAuthStore } from "../stores/auth";
 import type { Group, Page, Skill } from "../types";
+
+function roleLabel(role: Group["current_user_role"]): string {
+  switch (role) {
+    case "owner":
+      return "群主";
+    case "admin":
+      return "管理员";
+    case "member":
+      return "成员";
+    default:
+      return "—";
+  }
+}
 
 export function DashboardPage() {
   const navigate = useNavigate();
+  const displayName = useAuthStore((state) => state.user?.display_name);
   const skills = useQuery({
     queryKey: ["skills", "dashboard"],
-    queryFn: () => api.get<Page<Skill>>("/skills?page_size=3").then((r) => r.data),
+    queryFn: () => api.get<Page<Skill>>("/skills?page_size=5").then((r) => r.data),
   });
   const groups = useQuery({
     queryKey: ["groups", "dashboard"],
-    queryFn: () => api.get<Page<Group>>("/groups?page_size=3").then((r) => r.data),
+    queryFn: () => api.get<Page<Group>>("/groups?page_size=100").then((r) => r.data),
   });
+
+  const today = new Date();
+  const dateLabel = `${today.getFullYear()} 年 ${today.getMonth() + 1} 月 ${today.getDate()} 日`;
+  const weekday = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"][
+    today.getDay()
+  ];
+
+  const recentSkills = skills.data?.items ?? [];
+  const managedGroups = (groups.data?.items ?? []).filter((group) =>
+    ["owner", "admin"].includes(group.current_user_role ?? ""),
+  );
 
   return (
     <>
-      <section className="hero dashboard-hero">
-        <div className="hero-copy">
-          <div className="hero-status">
-            <Radio size={15} aria-hidden="true" />
-            <span>工作空间已同步</span>
-            <small>SYS.26</small>
-          </div>
-          <h1>
-            让能力
-            <span>持续发生。</span>
-          </h1>
-          <p>
-            将个人方法、团队经验与经过审核的全局能力，编织成一套可生长、可追溯、可协作的知识系统。
+      <div className="welcome-band">
+        <div className="welcome-copy">
+          <h1>你好，{displayName || "用户"}</h1>
+          <p className="welcome-date">
+            {dateLabel} · {weekday}
           </p>
-          <div className="hero-actions">
-            <Button
-              type="primary"
-              size="large"
-              icon={<Plus size={18} aria-hidden="true" />}
-              onClick={() => navigate("/skills?create=1")}
-            >
-              创建 Skill
-            </Button>
-            <Button
-              size="large"
-              icon={<ArrowRight size={18} aria-hidden="true" />}
-              iconPlacement="end"
-              onClick={() => navigate("/groups")}
-            >
-              进入协作空间
-            </Button>
-          </div>
-          <div className="hero-footnote">
-            <span>PRIVATE</span>
-            <span>COLLABORATIVE</span>
-            <span>VERSIONED</span>
-          </div>
         </div>
-
-        <figure className="hero-visual">
-          <img
-            src="/art/skillhive-orbit.png"
-            alt="由钴蓝玻璃、金属节点与橙色轨道构成的抽象能力网络"
-            width={1672}
-            height={941}
-            fetchPriority="high"
-          />
-          <div className="hero-scanline" aria-hidden="true" />
-          <figcaption>
-            <span>LIVE KNOWLEDGE TOPOLOGY</span>
-            <strong>SH / 001</strong>
-          </figcaption>
-          <div className="orbit-note orbit-note-a" aria-hidden="true">
-            01 / CAPTURE
-          </div>
-          <div className="orbit-note orbit-note-b" aria-hidden="true">
-            02 / CONNECT
-          </div>
-        </figure>
-      </section>
-
-      <div className="kinetic-strip" aria-hidden="true">
-        <div>
-          SKILLS AS SYSTEMS <span>•</span> KNOWLEDGE IN MOTION <span>•</span> BUILT FOR
-          TEAMS <span>•</span> SKILLS AS SYSTEMS <span>•</span> KNOWLEDGE IN MOTION
+        <div className="welcome-actions">
+          <Button
+            type="primary"
+            icon={<Plus size={16} aria-hidden="true" />}
+            onClick={() => navigate("/skills?create=1")}
+          >
+            创建 Skill
+          </Button>
+          <Button
+            icon={<FileText size={16} aria-hidden="true" />}
+            onClick={() => navigate("/templates")}
+          >
+            浏览模板
+          </Button>
         </div>
       </div>
 
       <section className="stat-grid" aria-label="工作空间数据">
         <button className="stat stat-featured" onClick={() => navigate("/skills")}>
-          <span className="stat-index">01</span>
-          <BookOpen size={24} strokeWidth={1.5} aria-hidden="true" />
-          <div>
+          <span className="stat-icon">
+            <BookOpen size={20} aria-hidden="true" />
+          </span>
+          <span className="stat-body">
             <span className="stat-label">我的 Skills</span>
-            <strong>{skills.data?.total ?? "—"}</strong>
-            <p>正在沉淀的私人工作方法</p>
-          </div>
-          <ArrowUpRight className="stat-arrow" size={20} aria-hidden="true" />
+            <span className="stat-value">{skills.data?.total ?? "—"}</span>
+            <span className="stat-desc">私人沉淀的工作方法</span>
+          </span>
         </button>
         <button className="stat" onClick={() => navigate("/groups")}>
-          <span className="stat-index">02</span>
-          <Users size={24} strokeWidth={1.5} aria-hidden="true" />
-          <div>
+          <span className="stat-icon">
+            <Users size={20} aria-hidden="true" />
+          </span>
+          <span className="stat-body">
             <span className="stat-label">协作群组</span>
-            <strong>{groups.data?.total ?? "—"}</strong>
-            <p>共享、审核与演化团队能力</p>
-          </div>
-          <ArrowUpRight className="stat-arrow" size={20} aria-hidden="true" />
+            <span className="stat-value">{groups.data?.total ?? "—"}</span>
+            <span className="stat-desc">共享、审核与演化能力</span>
+          </span>
         </button>
         <button className="stat" onClick={() => navigate("/group-skills")}>
-          <span className="stat-index">03</span>
-          <Blocks size={24} strokeWidth={1.5} aria-hidden="true" />
-          <div>
-            <span className="stat-label">群组 Skills</span>
-            <strong className="stat-word">浏览</strong>
-            <p>发现当前可用的全局能力</p>
-          </div>
-          <ArrowUpRight className="stat-arrow" size={20} aria-hidden="true" />
+          <span className="stat-icon stat-icon-accent">
+            <Blocks size={20} aria-hidden="true" />
+          </span>
+          <span className="stat-body">
+            <span className="stat-label">我管理的群组</span>
+            <span className="stat-value">{managedGroups.length}</span>
+            <span className="stat-desc">查看群组已启用的 Skills</span>
+          </span>
+        </button>
+        <button className="stat" onClick={() => navigate("/templates")}>
+          <span className="stat-icon stat-icon-green">
+            <FileText size={20} aria-hidden="true" />
+          </span>
+          <span className="stat-body">
+            <span className="stat-label">模板库</span>
+            <span className="stat-value">快速开始</span>
+            <span className="stat-desc">从模板一键创建 Skill</span>
+          </span>
         </button>
       </section>
 
-      <section className="dashboard-section">
-        <div className="section-title">
-          <div>
-            <span className="section-kicker">RECENT SIGNALS / 03</span>
+      <div className="home-columns">
+        <section className="home-card" aria-label="最近的 Skills">
+          <div className="home-card-head">
             <h2>最近的 Skills</h2>
+            <Button type="text" onClick={() => navigate("/skills")}>
+              查看全部
+            </Button>
           </div>
-          <Button
-            type="text"
-            icon={<ArrowRight size={17} aria-hidden="true" />}
-            iconPlacement="end"
-            onClick={() => navigate("/skills")}
-          >
-            查看全部
-          </Button>
-        </div>
-        {skills.isLoading ? (
-          <Skeleton active />
-        ) : skills.data?.items.length ? (
           <div className="compact-list">
-            {skills.data.items.map((skill, index) => (
+            {recentSkills.length ? (
+              recentSkills.map((skill) => (
+                <button
+                  key={skill.id}
+                  className="compact-row"
+                  onClick={() => navigate(`/skills?skill=${skill.id}`)}
+                >
+                  <span className="compact-main">
+                    <span className="compact-title">{skill.name}</span>
+                    <span className="compact-sub">
+                      {skill.description || skill.slug}
+                    </span>
+                  </span>
+                  <Tag color={skill.status === "published" ? "blue" : "default"}>
+                    {skill.status === "published" ? "已发布" : "草稿"}
+                  </Tag>
+                  <ArrowRight className="compact-arrow" size={16} aria-hidden="true" />
+                </button>
+              ))
+            ) : (
+              <div className="compact-pad">
+                <Empty
+                  image={<BookOpen className="empty-icon" aria-hidden="true" />}
+                  description="还没有私人 Skill，去「我的 Skills」创建第一个吧"
+                />
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="home-card" aria-label="协作群组">
+          <div className="home-card-head">
+            <h2>协作群组</h2>
+            <Button type="text" onClick={() => navigate("/groups")}>
+              全部群组
+            </Button>
+          </div>
+          <div className="compact-list">
+            {(groups.data?.items ?? []).slice(0, 4).map((group) => (
               <button
-                key={skill.id}
+                key={group.id}
                 className="compact-row"
-                onClick={() => navigate(`/skills?skill=${skill.id}`)}
+                onClick={() => navigate(`/groups/${group.id}`)}
               >
-                <span className="compact-index">0{index + 1}</span>
-                <div className="compact-copy">
-                  <Typography.Text strong>{skill.name}</Typography.Text>
-                  <Typography.Paragraph type="secondary">
-                    {skill.description || "暂无描述"}
-                  </Typography.Paragraph>
-                </div>
-                <Tag color={skill.status === "published" ? "geekblue" : undefined}>
-                  {skill.status}
-                </Tag>
-                <ArrowUpRight size={18} aria-hidden="true" />
+                <span className="compact-main">
+                  <span className="compact-title">{group.name}</span>
+                  <span className="compact-sub">
+                    我的角色：{roleLabel(group.current_user_role)}
+                  </span>
+                </span>
+                <ArrowRight className="compact-arrow" size={16} aria-hidden="true" />
               </button>
             ))}
+            {groups.data && groups.data.items.length === 0 && (
+              <div className="compact-pad">
+                <Empty
+                  image={<Users className="empty-icon" aria-hidden="true" />}
+                  description="还没有加入任何群组"
+                />
+              </div>
+            )}
           </div>
-        ) : (
-          <Empty
-            image={<BookOpen className="empty-icon" aria-hidden="true" />}
-            description="还没有私人 Skill"
-          />
-        )}
-      </section>
+        </section>
+      </div>
     </>
   );
 }

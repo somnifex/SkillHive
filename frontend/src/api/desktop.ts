@@ -285,3 +285,32 @@ export async function resolveConflict(
   if (pending === null) throw new Error("冲突解决仅在内置客户端中可用");
   return await pending;
 }
+
+
+export interface DesktopLoginResult {
+  deviceId: string;
+  clientInstanceId: string;
+  expiresIn: number;
+}
+
+/**
+ * Registers this desktop as a sync device and stores refresh credentials in
+ * the OS keyring. Must run after the web session login so the sync worker
+ * can push/pull for the logged-in user.
+ */
+export async function desktopLogin(input: {
+  username: string;
+  password: string;
+  baseUrl: string;
+}): Promise<DesktopLoginResult | null> {
+  const pending = tauriInvoke("desktop_login", { request: input });
+  if (pending === null) return null;
+  return (await pending) as DesktopLoginResult;
+}
+
+/** Clears the keyring credentials of the sync device (best effort). */
+export async function desktopLogout(): Promise<void> {
+  const pending = tauriInvoke("desktop_logout", {});
+  if (pending === null) return;
+  await pending;
+}

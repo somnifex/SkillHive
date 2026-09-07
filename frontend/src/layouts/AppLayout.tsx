@@ -18,6 +18,8 @@ import { useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import { isDesktop } from "../api/server";
+import { desktopLogout } from "../api/desktop";
 import { BrandLogo } from "../components/BrandLogo";
 import { SyncStatus } from "../components/SyncStatus";
 import { useAppearanceStore, useAuthStore } from "../stores/auth";
@@ -70,6 +72,9 @@ export function AppLayout() {
     try {
       await api.post("/auth/logout");
     } finally {
+      if (isDesktop()) {
+        await desktopLogout().catch(() => undefined);
+      }
       clearSession();
       navigate("/login");
     }

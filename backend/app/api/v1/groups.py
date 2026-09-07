@@ -48,6 +48,14 @@ def create_group(
     return GroupService(session, user).create(data)
 
 
+@router.get("/tree", response_model=list[GroupRead])
+def group_tree(
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> list[GroupRead]:
+    return GroupService(session, user).tree()
+
+
 @router.get("/invitations", response_model=list[InvitationRead])
 def my_invitations(
     user: CurrentUser,

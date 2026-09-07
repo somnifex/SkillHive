@@ -21,6 +21,9 @@ from app.schemas.group import (
 from app.schemas.user import UserSummary
 from app.services.audit import write_audit
 
+MANAGER_ROLES = frozenset({"owner", "admin"})
+MAX_GROUP_DEPTH = 16
+
 
 class GroupService:
     def __init__(self, session: Session, user: User) -> None:
@@ -36,26 +39,60 @@ class GroupService:
         page_size: int,
         managed_only: bool,
     ) -> Page[GroupRead]:
-        rows, total = self.groups.list_for_user(
-            self.user.id,
-            page=page,
-            page_size=page_size,
-            managed_only=managed_only,
-        )
+        if self.user.is_global_admin:
+            groups, total = self.groups.list_all_active(page=page, page_size=page_size)
+            roles = {group.id: "owner" for group in groups}
+        else:
+            rows, total = self.groups.list_for_user(
+                self.user.id,
+                page=page,
+                page_size=page_size,
+                managed_only=managed_only,
+            )
+            groups = [group for group, _role in rows]
+            roles = self.groups.effective_roles([group.id for group in groups], self.user.id)
         return Page[GroupRead](
-            items=[self._read(group, role) for group, role in rows],
+            items=self._read_many(groups, roles),
             page=page,
             page_size=page_size,
             total=total,
             pages=ceil(total / page_size) if total else 0,
         )
 
+    def tree(self) -> list[GroupRead]:
+        if self.user.is_global_admin:
+            groups = self.groups.list_active_all()
+            return self._read_many(groups, {group.id: "owner" for group in groups})
+        group_ids = self.groups.visible_group_ids(self.user.id)
+        roles = self.groups.effective_roles(group_ids, self.user.id)
+        groups = self.groups.get_active_by_ids(group_ids)
+        return self._read_many(groups, roles)
+
     def create(self, data: GroupCreate) -> GroupRead:
+        parent: Group | None = None
+        if data.parent_group_id:
+            parent = self.groups.get_active(data.parent_group_id)
+            if parent is None:
+                raise AppError("GROUP_NOT_FOUND", "Parent group was not found.", 404)
+            parent_role = self._effective_role_for(parent.id)
+            if parent_role not in MANAGER_ROLES:
+                raise AppError(
+                    "PERMISSION_DENIED",
+                    "Group administrator permission is required.",
+                    403,
+                )
+            if len(self.groups.ancestor_ids(parent.id)) + 1 > MAX_GROUP_DEPTH:
+                raise AppError(
+                    "GROUP_DEPTH_EXCEEDED",
+                    f"Group nesting is limited to {MAX_GROUP_DEPTH} levels.",
+                    400,
+                )
         group = Group(
             name=data.name.strip(),
             description=data.description,
             group_type="personal",
             owner_id=self.user.id,
+            parent_id=parent.id if parent else None,
             join_policy=data.join_policy,
             allow_member_invite=data.allow_member_invite,
             status="active",
@@ -77,26 +114,43 @@ class GroupService:
             action="group.created",
             resource_type="group",
             resource_id=group.id,
-            after_data={"name": group.name, "join_policy": group.join_policy},
+            after_data={
+                "name": group.name,
+                "join_policy": group.join_policy,
+                "parent_id": group.parent_id,
+            },
         )
         self.session.commit()
         return self._read(group, "owner")
 
     def get(self, group_id: str) -> GroupRead:
-        group, membership = self._member_context(group_id)
-        return self._read(group, membership.role)
+        group, role = self._member_context(group_id)
+        return self._read(group, role)
 
     def update(self, group_id: str, data: GroupUpdate) -> GroupRead:
-        group, membership = self._manager_context(group_id)
+        group, role = self._manager_context(group_id)
         updates = data.model_dump(exclude_unset=True)
-        if membership.role != "owner":
+        if role != "owner":
             updates.pop("join_policy", None)
             updates.pop("allow_member_invite", None)
         before = {
             "name": group.name,
             "join_policy": group.join_policy,
             "allow_member_invite": group.allow_member_invite,
+            "parent_id": group.parent_id,
         }
+        if "parent_group_id" in updates:
+            # Reparenting stays owner-only (local owner or global admin) even
+            # though general updates are manager operations.
+            if role != "owner":
+                raise AppError(
+                    "PERMISSION_DENIED",
+                    "Group owner permission is required.",
+                    403,
+                )
+            new_parent_id = updates.pop("parent_group_id")
+            self._apply_parent(group, new_parent_id)
+            updates["parent_group_id"] = new_parent_id
         for key, value in updates.items():
             if value is not None:
                 setattr(group, key, value)
@@ -110,7 +164,7 @@ class GroupService:
             after_data=updates,
         )
         self.session.commit()
-        return self._read(group, membership.role)
+        return self._read(group, role)
 
     def members(self, group_id: str) -> list[MemberRead]:
         group, _ = self._member_context(group_id)
@@ -122,8 +176,8 @@ class GroupService:
         return [self._member_read(member) for member in memberships]
 
     def invite(self, group_id: str, identity: str) -> InvitationRead:
-        group, membership = self._member_context(group_id)
-        if membership.role not in {"owner", "admin"} and not group.allow_member_invite:
+        group, role = self._member_context(group_id)
+        if role not in MANAGER_ROLES and not group.allow_member_invite:
             raise AppError("PERMISSION_DENIED", "You cannot invite members.", 403)
         invitee = self.users.by_username_or_email(identity)
         if invitee is None or invitee.status != "active":
@@ -307,11 +361,11 @@ class GroupService:
         return self._member_read(target)
 
     def remove_member(self, group_id: str, user_id: str) -> None:
-        group, actor = self._manager_context(group_id)
+        group, actor_role = self._manager_context(group_id)
         target = self.groups.membership(group.id, user_id)
         if target is None:
             raise AppError("MEMBER_NOT_FOUND", "Member was not found.", 404)
-        if target.role == "owner" or (actor.role == "admin" and target.role != "member"):
+        if target.role == "owner" or (actor_role == "admin" and target.role != "member"):
             raise AppError("PERMISSION_DENIED", "You cannot remove this member.", 403)
         target.status = "removed"
         write_audit(
@@ -325,12 +379,15 @@ class GroupService:
         self.session.commit()
 
     def transfer_ownership(self, group_id: str, new_owner_user_id: str) -> None:
-        group, owner_membership = self._owner_context(group_id)
+        group, _ = self._owner_context(group_id)
         target = self.groups.membership(group.id, new_owner_user_id)
         if target is None:
             raise AppError("MEMBER_NOT_FOUND", "New owner must be an active member.", 404)
+        current_owner = self.groups.membership(group.id, group.owner_id)
+        before_owner_id = group.owner_id
+        if current_owner is not None and current_owner.user_id != target.user_id:
+            current_owner.role = "admin"
         target.role = "owner"
-        owner_membership.role = "admin"
         group.owner_id = target.user_id
         write_audit(
             self.session,
@@ -338,13 +395,16 @@ class GroupService:
             action="group.ownership_transferred",
             resource_type="group",
             resource_id=group.id,
-            before_data={"owner_id": self.user.id},
+            before_data={"owner_id": before_owner_id},
             after_data={"owner_id": target.user_id},
         )
         self.session.commit()
 
     def leave(self, group_id: str) -> None:
-        group, membership = self._member_context(group_id)
+        group = self.groups.get_active(group_id)
+        membership = self.groups.membership(group_id, self.user.id) if group else None
+        if group is None or membership is None:
+            raise AppError("GROUP_NOT_FOUND", "Group was not found.", 404)
         if membership.role == "owner":
             raise AppError(
                 "OWNER_CANNOT_LEAVE",
@@ -363,6 +423,12 @@ class GroupService:
 
     def dissolve(self, group_id: str) -> None:
         group, _ = self._owner_context(group_id)
+        if self.groups.active_child_count(group.id) > 0:
+            raise AppError(
+                "GROUP_HAS_CHILDREN",
+                "Dissolve or move the sub-groups first.",
+                409,
+            )
         group.status = "deleted"
         group.deleted_at = utc_now()
         write_audit(
@@ -375,29 +441,77 @@ class GroupService:
         )
         self.session.commit()
 
-    def _member_context(self, group_id: str) -> tuple[Group, GroupMember]:
+    def _effective_role_for(self, group_id: str) -> str | None:
+        if self.user.is_global_admin:
+            return "owner"
+        return self.groups.effective_roles([group_id], self.user.id).get(group_id)
+
+    def _member_context(self, group_id: str) -> tuple[Group, str]:
         group = self.groups.get_active(group_id)
-        membership = self.groups.membership(group_id, self.user.id) if group else None
-        if group is None or membership is None:
+        role = self._effective_role_for(group_id) if group else None
+        if group is None or role is None:
             raise AppError("GROUP_NOT_FOUND", "Group was not found.", 404)
-        return group, membership
+        return group, role
 
-    def _manager_context(self, group_id: str) -> tuple[Group, GroupMember]:
-        group, membership = self._member_context(group_id)
-        if membership.role not in {"owner", "admin"}:
+    def _manager_context(self, group_id: str) -> tuple[Group, str]:
+        group, role = self._member_context(group_id)
+        if role not in MANAGER_ROLES:
             raise AppError("PERMISSION_DENIED", "Group administrator permission is required.", 403)
-        return group, membership
+        return group, role
 
-    def _owner_context(self, group_id: str) -> tuple[Group, GroupMember]:
-        group, membership = self._member_context(group_id)
-        if membership.role != "owner":
+    def _owner_context(self, group_id: str) -> tuple[Group, str]:
+        group, role = self._member_context(group_id)
+        if role != "owner":
             raise AppError("PERMISSION_DENIED", "Group owner permission is required.", 403)
-        return group, membership
+        return group, role
+
+    def _apply_parent(self, group: Group, new_parent_id: str | None) -> None:
+        if new_parent_id == group.id:
+            raise AppError("GROUP_CYCLE", "A group cannot be its own parent.", 400)
+        if new_parent_id is None:
+            group.parent_id = None
+            return
+        parent = self.groups.get_active(new_parent_id)
+        if parent is None:
+            raise AppError("GROUP_NOT_FOUND", "Parent group was not found.", 404)
+        if new_parent_id in self.groups.descendant_ids(group.id):
+            raise AppError(
+                "GROUP_CYCLE",
+                "A group cannot move under its own subtree.",
+                400,
+            )
+        parent_role = self._effective_role_for(new_parent_id)
+        if parent_role not in MANAGER_ROLES:
+            raise AppError(
+                "PERMISSION_DENIED",
+                "Group administrator permission is required on the target parent.",
+                403,
+            )
+        new_depth = len(self.groups.ancestor_ids(new_parent_id)) + self.groups.subtree_depth(
+            group.id
+        )
+        if new_depth > MAX_GROUP_DEPTH:
+            raise AppError(
+                "GROUP_DEPTH_EXCEEDED",
+                f"Group nesting is limited to {MAX_GROUP_DEPTH} levels.",
+                400,
+            )
+        group.parent_id = new_parent_id
+
+    def _read_many(self, groups: list[Group], roles: dict[str, str]) -> list[GroupRead]:
+        parent_ids = {group.parent_id for group in groups if group.parent_id}
+        parent_names = self.groups.names_for(parent_ids)
+        results: list[GroupRead] = []
+        for group in groups:
+            result = GroupRead.model_validate(group)
+            result.current_user_role = roles.get(group.id)
+            if group.parent_id:
+                result.parent_name = parent_names.get(group.parent_id)
+            results.append(result)
+        return results
 
     def _read(self, group: Group, role: str) -> GroupRead:
-        result = GroupRead.model_validate(group)
-        result.current_user_role = role
-        return result
+        return self._read_many([group], {group.id: role})[0]
 
     def _member_read(self, membership: GroupMember) -> MemberRead:
         result = MemberRead.model_validate(membership)

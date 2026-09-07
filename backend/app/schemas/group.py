@@ -10,6 +10,7 @@ from app.schemas.user import UserSummary
 class GroupCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=5000)
+    parent_group_id: str | None = None
     join_policy: Literal["invite_only", "approval_required", "invite_link", "public"] = (
         "invite_only"
     )
@@ -19,6 +20,9 @@ class GroupCreate(BaseModel):
 class GroupUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=5000)
+    # Present in the payload = reparent (null moves the group to the root);
+    # absent = unchanged.
+    parent_group_id: str | None = None
     join_policy: Literal["invite_only", "approval_required", "invite_link", "public"] | None = None
     allow_member_invite: bool | None = None
 
@@ -30,6 +34,8 @@ class GroupRead(ORMModel):
     avatar_url: str | None
     group_type: str
     owner_id: str
+    parent_id: str | None = None
+    parent_name: str | None = None
     join_policy: str
     allow_member_invite: bool
     status: str

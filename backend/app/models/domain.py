@@ -47,12 +47,22 @@ class TokenSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class Group(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "groups"
+    __table_args__ = (
+        CheckConstraint(
+            "parent_id IS NULL OR parent_id != id",
+            name="ck_groups_parent_not_self",
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(120), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     avatar_url: Mapped[str | None] = mapped_column(String(500))
     group_type: Mapped[str] = mapped_column(String(20), default="personal", index=True)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("groups.id"),
+        index=True,
+    )
     join_policy: Mapped[str] = mapped_column(String(30), default="invite_only")
     allow_member_invite: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
@@ -60,6 +70,7 @@ class Group(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     owner: Mapped[User] = relationship(foreign_keys=[owner_id])
+    parent: Mapped["Group | None"] = relationship(remote_side="Group.id")
     members: Mapped[list["GroupMember"]] = relationship(
         back_populates="group",
         cascade="all, delete-orphan",

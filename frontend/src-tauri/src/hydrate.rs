@@ -45,6 +45,7 @@ pub enum HydrationError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HydrationOutcome {
     pub skill_id: String,
     pub manifest_hash: String,

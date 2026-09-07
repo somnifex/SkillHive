@@ -1,8 +1,20 @@
-import { Copy, Eye, FileArchive, PackageOpen, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import {
+  Copy,
+  Download,
+  Eye,
+  FileArchive,
+  PackageOpen,
+  Pencil,
+  Plus,
+  Rocket,
+  Search,
+  Trash2,
+} from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
   Button,
+  Checkbox,
   Drawer,
   Empty,
   Form,
@@ -15,11 +27,22 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type Key } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { api, errorMessage } from "../api/client";
-import { exportSkillZip, hasDesktopCommands, importSkillZip } from "../api/desktop";
+import {
+  deploySkillBatch,
+  exportSkillZip,
+  discoverAgents,
+  getDeploymentPrefs,
+  hasDesktopCommands,
+  hydrateSkillWorkspace,
+  importSkillZip,
+  listAgentProfiles,
+  setDeploymentPrefs,
+  type AgentDiscoveryResult,
+} from "../api/desktop";
 import { PageHeader } from "../components/PageHeader";
 import type { Page, Skill, SkillVersion } from "../types";
 
@@ -67,18 +90,23 @@ export function SkillsPage() {
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<string>();
+  const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<Skill | null>(null);
   const [detail, setDetail] = useState<Skill | null>(null);
   const [zipOpen, setZipOpen] = useState(false);
+  const [deploying, setDeploying] = useState<Skill | null>(null);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
   const [form] = Form.useForm<SkillFormValues>();
   const [zipForm] = Form.useForm<ZipImportForm>();
   const modalOpen = params.get("create") === "1" || Boolean(editing);
 
   const skills = useQuery({
-    queryKey: ["skills", search, status],
+    queryKey: ["skills", search, status, page],
     queryFn: () =>
       api
-        .get<Page<Skill>>("/skills", { params: { query: search || undefined, status } })
+        .get<Page<Skill>>("/skills", {
+          params: { query: search || undefined, status, page, page_size: 20 },
+        })
         .then((r) => r.data),
   });
   const versions = useQuery({
@@ -177,6 +205,20 @@ export function SkillsPage() {
     }
   };
 
+  // Hydration downloads a pulled skill's files into the managed workspace so
+  // it can be deployed; it is additive and idempotent.
+  const downloadSkill = useMutation({
+    mutationFn: (skill: Skill) => hydrateSkillWorkspace(skill.id),
+    onSuccess: (outcome) => {
+      message.success(
+        outcome.workspaceCreated
+          ? `已下载到本地（新增 ${outcome.blobsDownloaded} 个文件）`
+          : "本地已存在，无需下载",
+      );
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : errorMessage(error)),
+  });
+
   const openEdit = async (skill: Skill) => {
     const { data } = await api.get<Skill>(`/skills/${skill.id}`);
     setEditing(data);
@@ -246,6 +288,55 @@ export function SkillsPage() {
           }))}
         />
       </div>
+      {hasDesktopCommands() && selectedRowKeys.length > 0 && (
+        <Space className="batch-toolbar" style={{ marginBottom: 12 }}>
+          <Typography.Text type="secondary">已选 {selectedRowKeys.length} 项</Typography.Text>
+          <Button
+            size="small"
+            icon={<Rocket size={14} aria-hidden="true" />}
+            onClick={async () => {
+              const defaults = (await getDeploymentPrefs()).defaultTargets;
+              if (!defaults.length) {
+                message.warning("请先在「Agent 部署」页配置默认部署目标");
+                return;
+              }
+              let failed = 0;
+              for (const skillId of selectedRowKeys) {
+                const results = await deploySkillBatch(String(skillId), defaults);
+                if (results.some((item) => item.error)) failed += 1;
+              }
+              if (failed === 0) message.success(`已批量部署 ${selectedRowKeys.length} 个 Skill`);
+              else message.warning(`批量部署完成，其中 ${failed} 个失败，详见 Agent 部署页`);
+              setSelectedRowKeys([]);
+            }}
+          >
+            批量部署到默认目标
+          </Button>
+          <Popconfirm
+            title="删除选中的 Skill？"
+            description="内容会先进入回收站。"
+            onConfirm={async () => {
+              const ids = [...selectedRowKeys];
+              let failed = 0;
+              for (const id of ids) {
+                try {
+                  await api.delete(`/skills/${id}`);
+                } catch {
+                  failed += 1;
+                }
+              }
+              setSelectedRowKeys([]);
+              queryClient.invalidateQueries({ queryKey: ["skills"] });
+              if (failed) message.warning(`${ids.length - failed} 个已删除，${failed} 个失败`);
+              else message.success(`已删除 ${ids.length} 个 Skill`);
+            }}
+          >
+            <Button danger size="small" icon={<Trash2 size={14} aria-hidden="true" />}>
+              批量删除
+            </Button>
+          </Popconfirm>
+        </Space>
+      )}
       <Table
         rowKey="id"
         loading={skills.isLoading}
@@ -259,9 +350,13 @@ export function SkillsPage() {
           ),
         }}
         pagination={{
-          total: skills.data?.total,
+          current: page,
           pageSize: skills.data?.page_size ?? 20,
+          total: skills.data?.total,
+          showSizeChanger: false,
+          onChange: (next) => setPage(next),
         }}
+        rowSelection={hasDesktopCommands() ? { selectedRowKeys, onChange: setSelectedRowKeys } : undefined}
         columns={[
           {
             title: "名称",
@@ -295,7 +390,7 @@ export function SkillsPage() {
           },
           {
             title: "操作",
-            width: 180,
+            width: 220,
             render: (_: unknown, record: Skill) => (
               <Space>
                 <Button
@@ -320,16 +415,31 @@ export function SkillsPage() {
                   onClick={() => copy(record)}
                 />
                 {hasDesktopCommands() && (
-                  <Button
-                    type="text"
-                    aria-label="导出为 zip"
-                    icon={<FileArchive size={16} aria-hidden="true" />}
-                    onClick={() => exportZip(record)}
-                  />
+                  <>
+                    <Button
+                      type="text"
+                      aria-label="部署到 Agent"
+                      icon={<Rocket size={16} aria-hidden="true" />}
+                      onClick={() => setDeploying(record)}
+                    />
+                    <Button
+                      type="text"
+                      aria-label="下载到本地"
+                      icon={<Download size={16} aria-hidden="true" />}
+                      loading={downloadSkill.isPending && downloadSkill.variables?.id === record.id}
+                      onClick={() => downloadSkill.mutate(record)}
+                    />
+                    <Button
+                      type="text"
+                      aria-label="导出为 zip"
+                      icon={<FileArchive size={16} aria-hidden="true" />}
+                      onClick={() => exportZip(record)}
+                    />
+                  </>
                 )}
                 <Popconfirm
                   title="删除这个 Skill？"
-                  description="内容会被软删除，历史审计记录仍会保留。"
+                  description="内容会先进入回收站，可在回收站中恢复或彻底删除。"
                   onConfirm={() => remove(record)}
                 >
                   <Button
@@ -461,14 +571,135 @@ export function SkillsPage() {
           }}
           onFinish={(values) => importZip.mutate(values)}
         >
-          <Form.Item name="name" label="Skill 名称" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
           <Form.Item name="slug" label="Slug" rules={[{ required: true }]}>
             <Input placeholder="my-skill" />
           </Form.Item>
         </Form>
       </Modal>
+      <DeployModal
+        skill={deploying}
+        onClose={() => {
+          setDeploying(null);
+          queryClient.invalidateQueries({ queryKey: ["deployments"] });
+        }}
+      />
     </>
+  );
+}
+
+interface DeployTargetOption {
+  value: string;
+  label: string;
+}
+
+function collectTargetOptions(
+  discovery: AgentDiscoveryResult[],
+  profiles: Awaited<ReturnType<typeof listAgentProfiles>>,
+): DeployTargetOption[] {
+  const options: DeployTargetOption[] = [];
+  const seen = new Set<string>();
+  for (const result of discovery) {
+    for (const instance of result.instances) {
+      if (seen.has(instance.id)) continue;
+      seen.add(instance.id);
+      options.push({ value: instance.id, label: instance.displayName });
+    }
+  }
+  for (const profile of profiles) {
+    if (seen.has(profile.id)) continue;
+    seen.add(profile.id);
+    options.push({ value: profile.id, label: profile.displayName });
+  }
+  return options;
+}
+
+function DeployModal({ skill, onClose }: { skill: Skill | null; onClose: () => void }) {
+  const { message } = App.useApp();
+  const desktop = hasDesktopCommands() && Boolean(skill);
+  const [targets, setTargets] = useState<string[]>([]);
+  const [remember, setRemember] = useState(false);
+
+  const prefs = useQuery({
+    queryKey: ["deployment-prefs-skill", skill?.id],
+    queryFn: () => getDeploymentPrefs(skill!.id),
+    enabled: desktop,
+  });
+  const discovery = useQuery({
+    queryKey: ["desktop-agents"],
+    queryFn: discoverAgents,
+    enabled: desktop,
+  });
+  const profiles = useQuery({
+    queryKey: ["agent-profiles"],
+    queryFn: listAgentProfiles,
+    enabled: desktop,
+  });
+
+  useEffect(() => {
+    if (skill && prefs.data) {
+      setTargets(prefs.data.skillTargets ?? prefs.data.defaultTargets);
+    }
+  }, [skill, prefs.data]);
+
+  const deploy = useMutation({
+    mutationFn: async (input: { ids: string[]; remember: boolean }) => {
+      const results = await deploySkillBatch(skill!.id, input.ids);
+      if (input.remember) {
+        await setDeploymentPrefs({ skillId: skill!.id, profileIds: input.ids });
+      }
+      return results;
+    },
+    onSuccess: (items) => {
+      const ok = items.filter((item) => !item.error).length;
+      const failed = items.filter((item) => item.error);
+      if (ok > 0) message.success(`已部署到 ${ok} 个目标`);
+      for (const item of failed) {
+        message.error(`${item.agentProfileId}: ${item.error}`);
+      }
+      onClose();
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : errorMessage(error)),
+  });
+
+  const options = collectTargetOptions(discovery.data ?? [], profiles.data ?? []);
+
+  return (
+    <Modal
+      open={Boolean(skill)}
+      title={skill ? `部署「${skill.name}」到 Agent` : ""}
+      okText="部署"
+      confirmLoading={deploy.isPending}
+      onCancel={onClose}
+      onOk={() => {
+        if (!targets.length) {
+          message.warning("请至少选择一个部署目标");
+          return;
+        }
+        deploy.mutate({ ids: targets, remember });
+      }}
+    >
+      <Typography.Paragraph type="secondary">
+        部署前会自动下载远端创建的 Skill 到本地。默认目标可在「Agent 部署」页配置。
+      </Typography.Paragraph>
+      {prefs.data?.defaultTargets.length === 0 && (
+        <Typography.Text type="warning">尚未配置默认部署目标，请选择目标。</Typography.Text>
+      )}
+      <Select
+        mode="multiple"
+        style={{ width: "100%" }}
+        placeholder="选择部署目标"
+        value={targets}
+        loading={discovery.isLoading || profiles.isLoading || prefs.isLoading}
+        options={options}
+        onChange={setTargets}
+      />
+      <Checkbox
+        style={{ marginTop: 12 }}
+        checked={remember}
+        onChange={(event) => setRemember(event.target.checked)}
+      >
+        记住此 Skill 的部署目标（覆盖全局默认）
+      </Checkbox>
+    </Modal>
   );
 }

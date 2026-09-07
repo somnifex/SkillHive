@@ -7,6 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentDescriptor {
     pub id: String,
     pub display_name: String,
@@ -22,6 +23,7 @@ pub enum AgentKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentInstance {
     pub id: String,
     pub descriptor_id: String,
@@ -103,6 +105,7 @@ impl Default for AgentRegistry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentDiscoveryResult {
     pub descriptor: AgentDescriptor,
     pub instances: Vec<AgentInstance>,

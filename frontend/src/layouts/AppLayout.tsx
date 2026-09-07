@@ -7,6 +7,7 @@ import {
   LogOut,
   Menu as MenuIcon,
   Moon,
+  Rocket,
   Settings,
   ShieldCheck,
   Sun,
@@ -18,6 +19,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
 import { BrandLogo } from "../components/BrandLogo";
+import { SyncStatus } from "../components/SyncStatus";
 import { useAppearanceStore, useAuthStore } from "../stores/auth";
 
 const { Header, Sider, Content } = Layout;
@@ -25,6 +27,7 @@ const { Header, Sider, Content } = Layout;
 const workNavigation = [
   { key: "/", icon: Home, label: "工作台" },
   { key: "/skills", icon: BookOpen, label: "我的 Skills" },
+  { key: "/agents", icon: Rocket, label: "Agent 部署" },
   { key: "/templates", icon: FileText, label: "模板库" },
 ];
 
@@ -36,6 +39,7 @@ const teamNavigation = [
 const routeTitles: Record<string, string> = {
   "/": "工作台",
   "/skills": "我的 Skills",
+  "/agents": "Agent 部署",
   "/templates": "模板库",
   "/groups": "协作群组",
   "/group-skills": "群组 Skills",
@@ -53,7 +57,7 @@ export function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const selected =
-    ["/skills", "/templates", "/groups", "/group-skills", "/admin", "/settings"].find(
+    ["/skills", "/agents", "/templates", "/groups", "/group-skills", "/admin", "/settings"].find(
       (path) => location.pathname.startsWith(path),
     ) ?? "/";
 
@@ -178,6 +182,7 @@ export function AppLayout() {
             </div>
           </div>
           <div className="top-actions">
+            <SyncStatus />
             <Button
               type="text"
               className="icon-button"

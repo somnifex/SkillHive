@@ -786,6 +786,28 @@ pub fn run() {
             let deployment = DeploymentEngine::open(data_dir.join("deployment-journal"))?;
             let uninstall = UninstallEngine::open(data_dir.join("uninstall-journal"))?;
             let mut deployment_recovery = deployment.recover_incomplete(&blobs)?;
+            // M4: deployment-recovery diagnostics (transaction IDs + counts).
+            if !deployment_recovery.catalog_commits.is_empty()
+                || !deployment_recovery.failed.is_empty()
+            {
+                telemetry::event(
+                    "deployment_recovery",
+                    &[
+                        (
+                            "rolled_forward",
+                            &deployment_recovery.catalog_commits.len().to_string(),
+                        ),
+                        (
+                            "rolled_back",
+                            &deployment_recovery.rolled_back.to_string(),
+                        ),
+                        (
+                            "failed",
+                            &deployment_recovery.failed.len().to_string(),
+                        ),
+                    ],
+                );
+            }
 
             for recovered in deployment_recovery.catalog_commits.clone() {
                 // DeploymentEngine already verified before roll-forward. Verify

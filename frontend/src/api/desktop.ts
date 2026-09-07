@@ -134,8 +134,13 @@ export interface DesktopSyncState {
 
 export interface DesktopConflict {
   skillId: string;
-  localSkillName?: string;
-  lastError?: string | null;
+  localName: string;
+  localSlug: string;
+  localSnapshotHash: string;
+  localBaseRevision: number | null;
+  remoteHeadRevision: number | null;
+  mutationId: string;
+  mutationOperation: string;
 }
 
 export interface ResolutionApplied {

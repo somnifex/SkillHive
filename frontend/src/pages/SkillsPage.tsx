@@ -15,6 +15,7 @@ import {
   App,
   Button,
   Checkbox,
+  Tabs,
   Drawer,
   Empty,
   Form,
@@ -44,6 +45,7 @@ import {
   type AgentDiscoveryResult,
 } from "../api/desktop";
 import { PageHeader } from "../components/PageHeader";
+import { TrashTab } from "../components/TrashTab";
 import type { Page, Skill, SkillVersion } from "../types";
 
 interface SkillFormValues {
@@ -96,6 +98,7 @@ export function SkillsPage() {
   const [zipOpen, setZipOpen] = useState(false);
   const [deploying, setDeploying] = useState<Skill | null>(null);
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
+  const [tab, setTab] = useState("skills");
   const [form] = Form.useForm<SkillFormValues>();
   const [zipForm] = Form.useForm<ZipImportForm>();
   const modalOpen = params.get("create") === "1" || Boolean(editing);
@@ -268,6 +271,16 @@ export function SkillsPage() {
           </>
         }
       />
+      <Tabs
+        activeKey={tab}
+        onChange={setTab}
+        items={[
+          { key: "skills", label: "全部 Skill" },
+          { key: "trash", label: "回收站" },
+        ]}
+      />
+      {tab === "skills" && (
+      <>
       <div className="toolbar">
         <Input
           allowClear
@@ -454,6 +467,9 @@ export function SkillsPage() {
           },
         ]}
       />
+      </>
+      )}
+      {tab === "trash" && <TrashTab />}
       <Modal
         open={modalOpen}
         title={editing ? "编辑 Skill" : "创建 Skill"}

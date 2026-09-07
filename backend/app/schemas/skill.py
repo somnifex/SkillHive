@@ -123,6 +123,8 @@ class SkillRead(ORMModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+    # Set only while the skill sits in the trash (status == 'deleted').
+    deleted_at: datetime | None = None
     current_version: SkillVersionRead | None = None
 
 

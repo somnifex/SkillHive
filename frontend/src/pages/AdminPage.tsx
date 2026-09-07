@@ -40,6 +40,7 @@ interface SettingsFormValues {
   s3_region?: string | null;
   allow_registration?: boolean;
   max_package_bytes?: number | null;
+  trash_retention_days?: number;
 }
 
 interface GroupRow extends Group {
@@ -397,6 +398,14 @@ export function AdminPage() {
                     </Form.Item>
                     <Form.Item name="max_package_bytes" label="单包大小上限（字节）">
                       <InputNumber min={1} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </div>
+                  <div className="form-grid">
+                    <Form.Item
+                      name="trash_retention_days"
+                      label="回收站保留天数（0 = 仅手动清理）"
+                    >
+                      <InputNumber min={0} max={3650} style={{ width: "100%" }} />
                     </Form.Item>
                   </div>
                   <Button type="primary" htmlType="submit" loading={saveSettings.isPending}>

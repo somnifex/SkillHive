@@ -1,10 +1,11 @@
 use rusqlite::{Connection, TransactionBehavior};
 
 use super::LocalStoreError;
+use std::path::Path;
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 3;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 4;
 
-const MIGRATIONS: &[(i64, &str)] = &[
+pub(super) const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
         r#"
@@ -191,9 +192,28 @@ const MIGRATIONS: &[(i64, &str)] = &[
         VALUES (1, 1);
         "#,
     ),
+    (
+        4,
+        r#"
+        CREATE TABLE local_entitlements (
+            skill_id TEXT PRIMARY KEY NOT NULL,
+            lease TEXT NOT NULL,
+            permission_level TEXT NOT NULL,
+            offline_policy TEXT NOT NULL CHECK (offline_policy IN ('unlimited', 'ttl', 'disabled')),
+            offline_ttl_hours INTEGER CHECK (offline_ttl_hours IS NULL OR offline_ttl_hours >= 1),
+            issued_at TEXT,
+            expires_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(skill_id) REFERENCES local_skills(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX idx_local_entitlements_expires
+            ON local_entitlements(expires_at);
+        "#,
+    ),
 ];
 
-pub(super) fn migrate(connection: &mut Connection) -> Result<(), LocalStoreError> {
+pub(super) fn migrate(connection: &mut Connection, db_path: &Path) -> Result<(), LocalStoreError> {
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -216,11 +236,28 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), LocalStoreError
         });
     }
 
-    for (version, sql) in MIGRATIONS {
-        if *version <= current_version {
-            continue;
-        }
+    let pending: Vec<(i64, &str)> = MIGRATIONS
+        .iter()
+        .filter(|(version, _)| *version > current_version)
+        .copied()
+        .collect();
 
+    // A fresh install (empty database) has nothing to lose; the checkpoint
+    // matters only when an existing store is about to be migrated.
+    if !pending.is_empty() && !is_fresh_database(connection) {
+        // M4 migration-safety checkpoint (handoff §16): back the database up
+        // before the first migration step of this launch. Each migration is
+        // already transactional (step + version stamp commit atomically), but
+        // the backup also covers non-transactional surroundings — disk-full
+        // during WAL checkpointing, a torn page, or an app kill between
+        // steps. Startup replays the backup over the damaged store, so a
+        // failed migration costs at most the pending steps, never data. A
+        // fresh install has nothing to lose, so it writes no backup.
+        super::backup_database(connection, db_path, &pending[0].0)?;
+    }
+
+    for (version, sql) in pending {
+        super::telemetry_migration_start(version);
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(sql)?;
         transaction.execute(
@@ -228,7 +265,25 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), LocalStoreError
             [version],
         )?;
         transaction.commit()?;
+        super::telemetry_migration_done(version);
     }
 
     Ok(())
+}
+
+/// True when the connection points at a database with no user tables yet —
+/// i.e. a fresh install where every migration is about to run on nothing.
+/// Only the migration bookkeeping table (created just above) exists.
+fn is_fresh_database(connection: &Connection) -> bool {
+    let user_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name != 'schema_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    user_tables == 0
 }

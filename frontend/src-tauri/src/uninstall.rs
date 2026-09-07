@@ -130,10 +130,14 @@ impl UninstallEngine {
         let target_exists = path_entry_exists(&journal.target_path)?;
         let quarantine_exists = path_entry_exists(&journal.quarantined_path)?;
         if target_exists && quarantine_exists {
-            return Err(UninstallError::AmbiguousFilesystemState(transaction_id.to_owned()));
+            return Err(UninstallError::AmbiguousFilesystemState(
+                transaction_id.to_owned(),
+            ));
         }
         if target_exists {
-            return Err(UninstallError::CatalogCommitNotReflected(transaction_id.to_owned()));
+            return Err(UninstallError::CatalogCommitNotReflected(
+                transaction_id.to_owned(),
+            ));
         }
         if quarantine_exists {
             remove_any(&journal.quarantined_path)?;
@@ -213,9 +217,7 @@ impl UninstallEngine {
             match outcome {
                 Ok(Some(item)) => report.pending.push(item),
                 Ok(None) => {}
-                Err(error) => report
-                    .failed
-                    .push(format!("{}: {error}", path.display())),
+                Err(error) => report.failed.push(format!("{}: {error}", path.display())),
             }
         }
         Ok(report)
@@ -229,7 +231,8 @@ impl UninstallEngine {
         let path = self.journal_path(transaction_id);
         let journal = read_latest_journal(&path)?;
         validate_journal_paths(&journal)?;
-        if path_entry_exists(&journal.target_path)? || path_entry_exists(&journal.quarantined_path)? {
+        if path_entry_exists(&journal.target_path)? || path_entry_exists(&journal.quarantined_path)?
+        {
             return Err(UninstallError::AmbiguousFilesystemState(
                 transaction_id.to_owned(),
             ));
@@ -238,7 +241,8 @@ impl UninstallEngine {
     }
 
     fn journal_path(&self, transaction_id: &str) -> PathBuf {
-        self.journal_root.join(format!("{transaction_id}.uninstall"))
+        self.journal_root
+            .join(format!("{transaction_id}.uninstall"))
     }
 
     fn persist_journal(
@@ -251,11 +255,7 @@ impl UninstallEngine {
             ensure_regular_file(path)?;
         }
         let bytes = serde_json::to_vec(journal)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .create(true)
-            .open(path)?;
+        let mut file = OpenOptions::new().append(true).create(true).open(path)?;
         file.write_all(&bytes)?;
         file.write_all(b"\n")?;
         file.sync_all()?;

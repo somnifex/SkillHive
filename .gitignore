@@ -28,6 +28,7 @@ secrets.local/
 *.pfx
 data/*
 !data/.gitkeep
+backend/data/
 *.db
 *.db-journal
 *.db-shm
@@ -56,6 +57,7 @@ frontend/.eslintcache
 # Rust / Tauri build output
 /target/
 frontend/src-tauri/target/
+frontend/src-tauri/gen/
 *.pdb
 *.dSYM/
 

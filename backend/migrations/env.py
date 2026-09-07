@@ -26,7 +26,12 @@ from app.models import (  # noqa: F401
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True and would flip every logger
+    # created before alembic runs (app.* included) to disabled=True for the
+    # rest of the process — silently swallowing all later logs (found via
+    # the M4 observability tests). Alembic's own loggers are declared in
+    # alembic.ini and are recreated by name, so False is safe here.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

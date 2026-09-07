@@ -152,7 +152,10 @@ mod tests {
         let path = temp.path().join("skillhive.db");
         {
             let store = LocalStore::open(&path).expect("store");
-            assert_eq!(store.cache_policy().expect("policy").max_bytes, 2 * 1024 * 1024 * 1024);
+            assert_eq!(
+                store.cache_policy().expect("policy").max_bytes,
+                2 * 1024 * 1024 * 1024
+            );
             store
                 .set_cache_policy(LocalCachePolicy { max_bytes: 123_456 })
                 .expect("set");

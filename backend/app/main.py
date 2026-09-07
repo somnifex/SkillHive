@@ -12,6 +12,7 @@ from slowapi.util import get_remote_address
 from app.api.v1.router import router as api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
+from app.core.observability import RequestContextMiddleware, configure_logging
 
 
 def rate_limit_handler(request: Request, exc: Exception) -> Response:
@@ -34,6 +35,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    # Not gated on first-call: alembic's fileConfig can reconfigure root
+    # logging mid-process (e.g. the migration test), so always re-assert the
+    # SkillHive handler; configure_logging deduplicates it.
+    configure_logging(settings.log_level)
     app = FastAPI(
         title=settings.app_name,
         description="SkillHive team skill management API",
@@ -42,6 +47,10 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
         lifespan=lifespan,
     )
+    # Correlation-ID assignment/echo + structured access logging must run
+    # before (outside) the exception handlers so every response — including
+    # handler-generated error envelopes — carries the header.
+    app.add_middleware(RequestContextMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

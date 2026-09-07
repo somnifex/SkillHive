@@ -2,15 +2,18 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
 use super::{
-    path_to_string, validate_non_empty, CommitSkillEdit, LocalMutation, LocalStore, LocalStoreError,
-    MutationOperation, MutationState,
+    path_to_string, validate_non_empty, CommitSkillEdit, LocalMutation, LocalStore,
+    LocalStoreError, MutationOperation, MutationState,
 };
 
 impl LocalStore {
     /// Commits a user-visible local edit and its durable sync mutation in the
     /// same SQLite transaction. Callers must not report "saved" before this
     /// method succeeds.
-    pub fn commit_skill_edit(&self, edit: CommitSkillEdit) -> Result<LocalMutation, LocalStoreError> {
+    pub fn commit_skill_edit(
+        &self,
+        edit: CommitSkillEdit,
+    ) -> Result<LocalMutation, LocalStoreError> {
         validate_edit(&edit)?;
         if edit.operation == MutationOperation::Delete {
             return Err(LocalStoreError::InvalidInput(
@@ -128,7 +131,13 @@ impl LocalStore {
                 id, skill_id, local_sequence, operation, base_revision, payload_hash, state
             ) VALUES (?1, ?2, ?3, 'delete', ?4, ?5, 'pending')
             "#,
-            params![mutation_id, skill_id, local_sequence, base_revision, payload_hash],
+            params![
+                mutation_id,
+                skill_id,
+                local_sequence,
+                base_revision,
+                payload_hash
+            ],
         )?;
         transaction.commit()?;
 
@@ -221,7 +230,7 @@ impl LocalStore {
     }
 }
 
-fn next_local_sequence(
+pub(super) fn next_local_sequence(
     connection: &rusqlite::Connection,
     skill_id: &str,
 ) -> Result<i64, LocalStoreError> {
@@ -272,17 +281,19 @@ fn read_dispatchable(
     )?;
 
     let rows = statement.query_map([i64::from(limit)], raw_mutation_from_row)?;
-    rows.map(|row| row.map_err(LocalStoreError::from).and_then(RawMutation::into_local))
-        .collect()
+    rows.map(|row| {
+        row.map_err(LocalStoreError::from)
+            .and_then(RawMutation::into_local)
+    })
+    .collect()
 }
 
 fn read_mutation(
     connection: &rusqlite::Connection,
     mutation_id: &str,
 ) -> Result<LocalMutation, LocalStoreError> {
-    let raw = connection
-        .query_row(
-            r#"
+    let raw = connection.query_row(
+        r#"
             SELECT id, skill_id, local_sequence, operation, base_revision,
                    payload_hash, state, retry_count, next_attempt_at, last_attempt_at,
                    server_error_code, server_error_details, acknowledged_remote_revision,
@@ -290,9 +301,9 @@ fn read_mutation(
             FROM local_mutations
             WHERE id = ?1
             "#,
-            [mutation_id],
-            raw_mutation_from_row,
-        )?;
+        [mutation_id],
+        raw_mutation_from_row,
+    )?;
     raw.into_local()
 }
 
@@ -408,13 +419,21 @@ mod tests {
     #[test]
     fn local_edit_and_outbox_entry_commit_together() {
         let (_temp, store) = open_temp_store();
-        let mutation = store.commit_skill_edit(sample_edit("skill-1")).expect("commit");
+        let mutation = store
+            .commit_skill_edit(sample_edit("skill-1"))
+            .expect("commit");
 
         assert_eq!(mutation.state, MutationState::Pending);
         assert_eq!(mutation.local_sequence, 1);
         let skill = store.get_skill("skill-1").expect("read").expect("skill");
         assert_eq!(skill.sync_state, super::super::SkillSyncState::Dirty);
-        assert_eq!(store.list_dispatchable_mutations(10).expect("mutations").len(), 1);
+        assert_eq!(
+            store
+                .list_dispatchable_mutations(10)
+                .expect("mutations")
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -423,7 +442,9 @@ mod tests {
         let path = temp.path().join("skillhive.db");
         {
             let store = LocalStore::open(&path).expect("open store");
-            store.commit_skill_edit(sample_edit("skill-1")).expect("commit");
+            store
+                .commit_skill_edit(sample_edit("skill-1"))
+                .expect("commit");
         }
 
         let reopened = LocalStore::open(&path).expect("reopen store");
@@ -435,14 +456,19 @@ mod tests {
     #[test]
     fn claim_is_atomic_and_restart_requeues_in_flight_id() {
         let (_temp, store) = open_temp_store();
-        let original = store.commit_skill_edit(sample_edit("skill-1")).expect("commit");
+        let original = store
+            .commit_skill_edit(sample_edit("skill-1"))
+            .expect("commit");
 
         let claimed = store.claim_dispatchable_mutations(10).expect("claim");
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, original.id);
         assert_eq!(claimed[0].state, MutationState::InFlight);
         assert_eq!(claimed[0].retry_count, 1);
-        assert!(store.claim_dispatchable_mutations(10).expect("second claim").is_empty());
+        assert!(store
+            .claim_dispatchable_mutations(10)
+            .expect("second claim")
+            .is_empty());
 
         assert_eq!(store.recover_in_flight_mutations().expect("recover"), 1);
         let retried = store.claim_dispatchable_mutations(10).expect("retry claim");
@@ -454,7 +480,9 @@ mod tests {
     #[test]
     fn later_mutation_for_same_skill_waits_for_ack() {
         let (_temp, store) = open_temp_store();
-        let first = store.commit_skill_edit(sample_edit("skill-1")).expect("first");
+        let first = store
+            .commit_skill_edit(sample_edit("skill-1"))
+            .expect("first");
         let mut second_edit = sample_edit("skill-1");
         second_edit.operation = MutationOperation::Update;
         let second = store.commit_skill_edit(second_edit).expect("second");
@@ -487,13 +515,18 @@ mod tests {
 
         assert!(store.commit_skill_edit(edit).is_err());
         assert!(store.get_skill("skill-1").expect("read").is_none());
-        assert!(store.list_dispatchable_mutations(10).expect("mutations").is_empty());
+        assert!(store
+            .list_dispatchable_mutations(10)
+            .expect("mutations")
+            .is_empty());
     }
 
     #[test]
     fn delete_waits_behind_unacked_create() {
         let (_temp, store) = open_temp_store();
-        let created = store.commit_skill_edit(sample_edit("skill-1")).expect("commit");
+        let created = store
+            .commit_skill_edit(sample_edit("skill-1"))
+            .expect("commit");
         let deletion = store.queue_skill_delete("skill-1", None).expect("delete");
 
         assert_eq!(deletion.operation, MutationOperation::Delete);

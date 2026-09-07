@@ -81,7 +81,8 @@ pub fn import_agent_skill(
     }
 
     let snapshot = capture_workspace(blobs, &source, SnapshotPolicy::default())?;
-    let workspace = workspaces.import_snapshot(blobs, &request.skill_id, &snapshot.manifest_hash)?;
+    let workspace =
+        workspaces.import_snapshot(blobs, &request.skill_id, &snapshot.manifest_hash)?;
 
     Ok(ImportAgentSkillResult {
         workspace,
@@ -93,12 +94,16 @@ pub fn import_agent_skill(
 
 fn validate_directory_name(value: &str) -> Result<(), AgentSkillImportError> {
     if value.is_empty() || value.starts_with(".skillhive-") {
-        return Err(AgentSkillImportError::InvalidDirectoryName(value.to_owned()));
+        return Err(AgentSkillImportError::InvalidDirectoryName(
+            value.to_owned(),
+        ));
     }
     let mut components = Path::new(value).components();
     match (components.next(), components.next()) {
         (Some(Component::Normal(component)), None) if !component.is_empty() => Ok(()),
-        _ => Err(AgentSkillImportError::InvalidDirectoryName(value.to_owned())),
+        _ => Err(AgentSkillImportError::InvalidDirectoryName(
+            value.to_owned(),
+        )),
     }
 }
 

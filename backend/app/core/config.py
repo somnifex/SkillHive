@@ -15,8 +15,10 @@ class Settings(BaseSettings):
     app_name: str = "SkillHive"
     environment: str = "development"
     debug: bool = False
+    log_level: str = "INFO"
     api_v1_prefix: str = "/api/v1"
     database_url: str = "sqlite:///./data/skillhive.db"
+    blob_storage_path: str = "./data/blobs"
     jwt_secret_key: str = Field(
         default="development-only-change-me-at-least-32-bytes",
         min_length=16,
@@ -31,6 +33,14 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     login_max_attempts: int = 5
     login_lockout_minutes: int = 15
+
+    # Blob/change-log GC (docs/development/GC_DESIGN.md §8). All defaults are
+    # the conservative values from the design; the sweep only collects
+    # objects outside every mark root and past the orphan grace.
+    blob_gc_orphan_grace_hours: int = 24
+    change_log_retention_days: int = 90
+    receipt_retention_days: int = 90
+    blob_gc_batch_size: int = 1000
 
 
 @lru_cache

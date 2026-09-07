@@ -86,7 +86,9 @@ impl BlobStore {
                                 return Err(BlobStoreError::CorruptedExistingBlob(hash.clone()));
                             }
                         }
-                        Ok(_) => return Err(BlobStoreError::UnsafeStorageEntry(destination.clone())),
+                        Ok(_) => {
+                            return Err(BlobStoreError::UnsafeStorageEntry(destination.clone()))
+                        }
                         Err(_) => return Err(BlobStoreError::Io(error)),
                     }
                 }
@@ -221,6 +223,12 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format_digest(hasher.finalize().as_slice())
 }
 
+/// Public digest helper for sync download verification: hashes bytes with
+/// the same content-addressing scheme the store uses internally.
+pub fn hash_bytes_for_verification(bytes: &[u8]) -> String {
+    hash_bytes(bytes)
+}
+
 fn format_digest(digest: &[u8]) -> String {
     let mut output = String::with_capacity(HASH_PREFIX.len() + SHA256_HEX_LEN);
     output.push_str(HASH_PREFIX);
@@ -274,7 +282,10 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(store.verify(&first.hash).expect("verify"));
-        assert_eq!(store.read_bytes(&first.hash).expect("read"), b"hello SkillHive");
+        assert_eq!(
+            store.read_bytes(&first.hash).expect("read"),
+            b"hello SkillHive"
+        );
     }
 
     #[test]

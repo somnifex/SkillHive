@@ -8,8 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
 from app.db.base import utc_now
-from app.models import Skill, SkillVersion
+from app.models import Skill, SkillVersion, SyncChangeLog
 from app.services.audit import write_audit
+from app.services.blob_storage import BlobStorage, get_blob_storage
+from app.services.legacy_package import synthesize_legacy_package
 
 
 class SkillMutationService:
@@ -22,11 +24,77 @@ class SkillMutationService:
 
     Authorization is also deliberately outside this class. A caller must resolve
     an already-authorized Skill before passing it to update/delete/version methods.
+
+    Every domain mutation that changes the desktop-visible representation also
+    appends one :class:`SyncChangeLog` row in the same transaction, so
+    browser-originated and sync-originated changes surface identically in the
+    M2.5 pull feed (plan §11 “Existing REST changes”).
     """
 
     def __init__(self, session: Session, actor_user_id: str) -> None:
         self.session = session
         self.actor_user_id = actor_user_id
+        self._storage: BlobStorage | None = None
+
+    def _package_hash_for_content(
+        self,
+        *,
+        slug: str,
+        name: str,
+        description: str,
+        content: Mapping[str, Any],
+        package_manifest_hash: str | None,
+    ) -> str | None:
+        """Resolve the package identity for a new version row.
+
+        An explicit ``package_manifest_hash`` (the sync path) wins. A legacy
+        content-only write (browser REST path) synthesizes the minimal
+        ``SKILL.md`` package (plan §17) so the resulting version carries an
+        addressable package the desktop can pull and materialize.
+        """
+        if package_manifest_hash is not None:
+            return package_manifest_hash
+        if self._storage is None:
+            self._storage = get_blob_storage()
+        return synthesize_legacy_package(
+            self.session,
+            self._storage,
+            slug=slug,
+            name=name,
+            description=description,
+            content=dict(content),
+        )
+
+    def _emit_change_event(
+        self,
+        skill: Skill,
+        *,
+        operation: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        payload = (
+            metadata
+            if metadata is not None
+            else {
+                "name": skill.name,
+                "slug": skill.slug,
+                "description": skill.description,
+                "category": skill.category,
+                "tags": list(skill.tags or []),
+                "status": skill.status,
+            }
+        )
+        self.session.add(
+            SyncChangeLog(
+                resource_type="skill",
+                resource_id=skill.id,
+                resource_revision=skill.sync_revision,
+                operation=operation,
+                owner_user_id=skill.owner_user_id,
+                package_manifest_hash=skill.current_package_hash,
+                metadata_payload=payload,
+            )
+        )
 
     def create_skill(
         self,
@@ -66,13 +134,22 @@ class SkillMutationService:
         self.session.add(skill)
         self.session.flush()
 
+        resolved_package_hash = self._package_hash_for_content(
+            slug=skill.slug,
+            name=skill.name,
+            description=skill.description,
+            content=content,
+            package_manifest_hash=package_manifest_hash,
+        )
+        skill.current_package_hash = resolved_package_hash
+
         created_version = self._create_version_row(
             skill=skill,
             version=version,
             revision=skill.sync_revision,
             content=content,
             manifest=manifest,
-            package_manifest_hash=package_manifest_hash,
+            package_manifest_hash=resolved_package_hash,
             package_size_bytes=package_size_bytes,
             dependency_config=dependency_config,
             change_log=change_log,
@@ -95,6 +172,7 @@ class SkillMutationService:
             resource_id=skill.id,
             after_data=after_data,
         )
+        self._emit_change_event(skill, operation="upsert")
         return skill, created_version
 
     def update_skill(
@@ -131,6 +209,13 @@ class SkillMutationService:
             changed = True
             version_name = version or self.next_patch_version(skill)
             self.ensure_version_available(skill.id, version_name)
+            resolved_package_hash = self._package_hash_for_content(
+                slug=skill.slug,
+                name=skill.name,
+                description=skill.description,
+                content=content,
+                package_manifest_hash=package_manifest_hash,
+            )
             version_manifest = (
                 manifest if manifest is not None else {"name": skill.slug, "schema_version": 1}
             )
@@ -141,14 +226,14 @@ class SkillMutationService:
                 revision=next_revision,
                 content=content,
                 manifest=version_manifest,
-                package_manifest_hash=package_manifest_hash,
+                package_manifest_hash=resolved_package_hash,
                 package_size_bytes=package_size_bytes,
                 dependency_config=dependency_config or {},
                 change_log=change_log,
                 status=version_status,
             )
             skill.current_version_id = created_version.id
-            skill.current_package_hash = package_manifest_hash
+            skill.current_package_hash = resolved_package_hash
             if demote_published_on_new_version and skill.status == "published":
                 skill.status = "draft"
 
@@ -168,6 +253,8 @@ class SkillMutationService:
                 "revision": skill.sync_revision,
             },
         )
+        if changed:
+            self._emit_change_event(skill, operation="upsert")
         return created_version
 
     def create_version(
@@ -188,20 +275,27 @@ class SkillMutationService:
     ) -> SkillVersion:
         self.ensure_version_available(skill.id, version)
         next_revision = skill.sync_revision + 1
+        resolved_package_hash = self._package_hash_for_content(
+            slug=skill.slug,
+            name=skill.name,
+            description=skill.description,
+            content=content,
+            package_manifest_hash=package_manifest_hash,
+        )
         created_version = self._create_version_row(
             skill=skill,
             version=version,
             revision=next_revision,
             content=content,
             manifest=manifest,
-            package_manifest_hash=package_manifest_hash,
+            package_manifest_hash=resolved_package_hash,
             package_size_bytes=package_size_bytes,
             dependency_config=dependency_config,
             change_log=change_log,
             status=version_status,
         )
         skill.current_version_id = created_version.id
-        skill.current_package_hash = package_manifest_hash
+        skill.current_package_hash = resolved_package_hash
         skill.sync_revision = next_revision
 
         if publish_skill:
@@ -221,6 +315,7 @@ class SkillMutationService:
                 "revision": skill.sync_revision,
             },
         )
+        self._emit_change_event(skill, operation="upsert")
         return created_version
 
     def publish_version(
@@ -254,6 +349,8 @@ class SkillMutationService:
             resource_id=skill.id,
             after_data={"version": version.version, "revision": skill.sync_revision},
         )
+        if changed:
+            self._emit_change_event(skill, operation="upsert")
 
     def set_status(self, skill: Skill, status: str, *, audit_action: str) -> None:
         before_status = skill.status
@@ -269,6 +366,8 @@ class SkillMutationService:
             before_data={"status": before_status},
             after_data={"status": status, "revision": skill.sync_revision},
         )
+        if before_status != status:
+            self._emit_change_event(skill, operation="upsert")
 
     def soft_delete(self, skill: Skill, *, audit_action: str) -> None:
         before = {
@@ -276,7 +375,8 @@ class SkillMutationService:
             "status": skill.status,
             "revision": skill.sync_revision,
         }
-        if skill.status != "deleted" or skill.deleted_at is None:
+        deleted = skill.status != "deleted" or skill.deleted_at is None
+        if deleted:
             skill.status = "deleted"
             skill.deleted_at = utc_now()
             skill.sync_revision += 1
@@ -289,6 +389,8 @@ class SkillMutationService:
             before_data=before,
             after_data={"status": "deleted", "revision": skill.sync_revision},
         )
+        if deleted:
+            self._emit_change_event(skill, operation="delete")
 
     def ensure_version_available(self, skill_id: str, version: str) -> None:
         exists = self.session.scalar(

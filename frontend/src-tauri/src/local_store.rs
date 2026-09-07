@@ -1,12 +1,20 @@
 mod cache;
+mod conflicts;
 mod deployments;
+mod entitlements;
 mod migrations;
 mod mutations;
+mod outcomes;
+mod pull_apply;
 mod skills;
 mod sync_state;
 mod uninstall;
 
 pub use cache::{CacheSkillRecord, LocalCachePolicy};
+pub use conflicts::{ConflictRecord, ResolutionApplied};
+pub use entitlements::{entitlement_allows_offline_use, EntitlementPayload, StoredEntitlement};
+pub use outcomes::{MutationOutcome, OutcomeApplied};
+pub use pull_apply::{ChangeItem, ChangesPage, PageApplied};
 
 use std::{
     fs,
@@ -53,7 +61,7 @@ impl SkillSyncState {
     }
 }
 
-#[derive(Debug, Clone, Copy,PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOperation {
     Create,
@@ -254,13 +262,16 @@ pub struct LocalStoreHealth {
 impl LocalStore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, LocalStoreError> {
         let db_path = db_path.as_ref().to_path_buf();
-        if let Some(parent) = db_path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = db_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)?;
         }
 
         let mut connection = Connection::open(&db_path)?;
         configure_connection(&connection)?;
-        migrations::migrate(&mut connection)?;
+        migrations::migrate(&mut connection, &db_path)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -317,6 +328,41 @@ pub(super) fn path_to_string(path: &Path) -> Result<String, LocalStoreError> {
         .ok_or_else(|| LocalStoreError::NonUtf8Path(path.to_path_buf()))
 }
 
+/// M4 migration-safety checkpoint: copy the database to `*.pre-migration`
+/// beside the live file before the first pending migration step runs.
+///
+/// Uses SQLite's `VACUUM INTO`, which snapshots a consistent, compacted
+/// copy so the backup is a self-contained single file even with WAL active.
+/// Failure is reported but never blocks the migration itself: the per-step
+/// transactions remain the primary safety boundary, and the backup is the
+/// recovery net for non-transactional failure modes (disk-full during
+/// checkpointing, torn pages, kill between steps).
+pub(super) fn backup_database(
+    connection: &Connection,
+    db_path: &Path,
+    _first_pending_version: &i64,
+) -> Result<(), LocalStoreError> {
+    let backup_path = db_path.with_extension("sqlite3.pre-migration");
+    let backup_text = path_to_string(&backup_path)?;
+    connection.execute("VACUUM INTO ?1", rusqlite::params![backup_text])?;
+    crate::telemetry::event("migration_backup", &[("backup_path", &backup_text)]);
+    Ok(())
+}
+
+pub(super) fn telemetry_migration_start(version: i64) {
+    crate::telemetry::event(
+        "migration_start",
+        &[("to_version", version.to_string().as_str())],
+    );
+}
+
+pub(super) fn telemetry_migration_done(version: i64) {
+    crate::telemetry::event(
+        "migration_done",
+        &[("to_version", version.to_string().as_str())],
+    );
+}
+
 pub(super) fn validate_non_empty(field: &str, value: &str) -> Result<(), LocalStoreError> {
     if value.trim().is_empty() {
         return Err(LocalStoreError::InvalidInput(format!(
@@ -362,4 +408,83 @@ pub enum LocalStoreError {
     OutboxClaimLost(String),
     #[error("path is not valid UTF-8: {0:?}")]
     NonUtf8Path(PathBuf),
+}
+
+#[cfg(test)]
+mod migration_safety_tests {
+    use super::*;
+
+    /// The M4 checkpoint contract: opening a store whose schema is behind
+    /// leaves a queryable `*.pre-migration` snapshot beside the live file,
+    /// holding the pre-migration rows; a fresh install (no pending
+    /// migration) writes none.
+    #[test]
+    fn migration_backup_is_created_when_a_migration_is_pending() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("skillhive.db");
+
+        // Build a schema-v1 store by hand (current code would migrate to v4
+        // on open): apply only migration 1 via rusqlite, then seed a row.
+        {
+            let mut connection = rusqlite::Connection::open(&db_path).expect("open");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    "#,
+                )
+                .expect("schema_migrations");
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .expect("tx");
+            transaction
+                .execute_batch(migrations::MIGRATIONS[0].1)
+                .expect("migration 1");
+            transaction
+                .execute("INSERT INTO schema_migrations(version) VALUES (1)", [])
+                .expect("stamp");
+            transaction.commit().expect("commit");
+            connection
+                .execute(
+                    "INSERT INTO local_skills(id, name, slug, workspace_path, current_blob_hash, sync_state) \
+                     VALUES ('legacy-1', 'Legacy', 'legacy', 'C:\\w', 'sha256:legacy', 'remote_only')",
+                    [],
+                )
+                .expect("seed skill");
+        }
+
+        // Opening through LocalStore runs the pending migrations — and must
+        // have backed the pre-migration bytes up first.
+        let store = LocalStore::open(&db_path).expect("migrate store");
+        assert_eq!(
+            store.health().expect("health").schema_version,
+            migrations::LATEST_SCHEMA_VERSION
+        );
+
+        // The backup is a valid SQLite database still carrying the legacy row.
+        let backup_path = db_path.with_extension("sqlite3.pre-migration");
+        let backup_connection = Connection::open(&backup_path).expect("open backup");
+        let count: i64 = backup_connection
+            .query_row("SELECT COUNT(*) FROM local_skills", [], |row| row.get(0))
+            .expect("backup queryable");
+        assert_eq!(count, 1, "backup must contain the pre-migration data");
+
+        // The migrated live store kept the legacy row.
+        let skill = store.get_skill("legacy-1").expect("read").expect("skill");
+        assert_eq!(skill.id, "legacy-1");
+    }
+
+    #[test]
+    fn fresh_install_writes_no_migration_backup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("fresh.db");
+        let _store = LocalStore::open(&db_path).expect("fresh store");
+        assert!(
+            !db_path.with_extension("sqlite3.pre-migration").exists(),
+            "no backup on a fresh install"
+        );
+    }
 }

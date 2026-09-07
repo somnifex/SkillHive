@@ -68,7 +68,10 @@ impl AgentRegistry {
     }
 
     pub fn descriptors(&self) -> Vec<AgentDescriptor> {
-        self.adapters.iter().map(|adapter| adapter.descriptor()).collect()
+        self.adapters
+            .iter()
+            .map(|adapter| adapter.descriptor())
+            .collect()
     }
 
     pub fn discover_all(&self) -> Vec<AgentDiscoveryResult> {
@@ -473,12 +476,7 @@ mod tests {
         let home = home_dir().expect("home");
         let wrong = home.join("forged-skills");
         assert!(matches!(
-            validate_persisted_profile(
-                "claude-code:default",
-                "claude-code",
-                &wrong,
-                false,
-            ),
+            validate_persisted_profile("claude-code:default", "claude-code", &wrong, false,),
             Err(AgentAdapterError::InvalidProfileIdentity(_))
         ));
     }

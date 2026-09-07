@@ -7,10 +7,19 @@ pub mod local_store;
 pub mod skill_snapshot;
 pub mod snapshot_verifier;
 pub mod sync;
+pub mod sync_client;
+pub mod sync_pull;
+pub mod sync_push;
+pub mod sync_transport;
+pub mod sync_worker;
+pub mod telemetry;
 pub mod uninstall;
 pub mod workspace;
 
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use agent::{AgentDescriptor, AgentDiscoveryResult, AgentInstance, AgentKind, AgentRegistry};
 use blob_store::BlobStore;
@@ -24,6 +33,9 @@ use local_store::{
 use serde::{Deserialize, Serialize};
 use skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotPolicy};
 use snapshot_verifier::verify_materialized_snapshot;
+use sync::{SyncCycleReport, SyncEngine};
+use sync_client::{DeviceRegistrationRequest, SyncClient};
+use sync_worker::{spawn_sync_worker, SyncWorkerHandle};
 use tauri::Manager;
 use uninstall::{UninstallEngine, UninstallRequest};
 use workspace::{WorkspaceRef, WorkspaceStore};
@@ -49,6 +61,9 @@ pub struct DesktopStartupStatus {
     pub deployment_recovery: RecoveryReport,
     pub uninstall_recovery: UninstallStartupReport,
     pub agent_reconciliation_errors: Vec<String>,
+    /// Skill IDs whose M3 entitlements expired while the app was closed and
+    /// were reconciled to `access_revoked` at startup (offline policy).
+    pub expired_entitlements: Vec<String>,
     pub cache_enforcement: Option<CacheEnforcementReport>,
     pub cache_error: Option<String>,
 }
@@ -152,7 +167,9 @@ fn discover_agents(
 fn list_agent_profiles(
     store: tauri::State<'_, LocalStore>,
 ) -> Result<Vec<AgentProfileRecord>, String> {
-    store.list_agent_profiles().map_err(|error| error.to_string())
+    store
+        .list_agent_profiles()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -206,6 +223,7 @@ fn commit_local_skill_workspace(
     store: tauri::State<'_, LocalStore>,
     blobs: tauri::State<'_, BlobStore>,
     workspaces: tauri::State<'_, WorkspaceStore>,
+    sync_worker: tauri::State<'_, SyncWorkerHandle>,
     request: CommitLocalSkillWorkspaceRequest,
 ) -> Result<CommitLocalSkillWorkspaceResult, String> {
     let _guard = coordinator
@@ -214,7 +232,9 @@ fn commit_local_skill_workspace(
         .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
 
     if request.operation == MutationOperation::Delete {
-        return Err("workspace commit does not accept delete; deletion uses the tombstone path".to_owned());
+        return Err(
+            "workspace commit does not accept delete; deletion uses the tombstone path".to_owned(),
+        );
     }
 
     let workspace = workspaces
@@ -239,6 +259,10 @@ fn commit_local_skill_workspace(
         .get_skill(&request.skill_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("skill disappeared after local commit: {}", request.skill_id))?;
+
+    // Local work landed — trigger the background worker so it starts
+    // flowing to the server without waiting for the heartbeat.
+    sync_worker.request_sync();
 
     let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
     Ok(CommitLocalSkillWorkspaceResult {
@@ -273,7 +297,10 @@ fn release_skill_workspace(
         ));
     }
 
-    let Some(workspace) = workspaces.get(&skill_id).map_err(|error| error.to_string())? else {
+    let Some(workspace) = workspaces
+        .get(&skill_id)
+        .map_err(|error| error.to_string())?
+    else {
         let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
         return Ok(ReleaseSkillWorkspaceResult {
             released: false,
@@ -282,7 +309,9 @@ fn release_skill_workspace(
         });
     };
     if workspace.path != skill.workspace_path {
-        return Err("local skill workspace path does not match the managed workspace root".to_owned());
+        return Err(
+            "local skill workspace path does not match the managed workspace root".to_owned(),
+        );
     }
 
     let current = capture_workspace(&blobs, &workspace.path, SnapshotPolicy::default())
@@ -430,7 +459,9 @@ fn uninstall_skill_from_agent(
             .err()
             .map(|recovery_error| format!("; immediate recovery failed: {recovery_error}"))
             .unwrap_or_default();
-        return Err(format!("deployment catalog removal failed: {error}{recovery_note}"));
+        return Err(format!(
+            "deployment catalog removal failed: {error}{recovery_note}"
+        ));
     }
 
     let recovery_pending = filesystem
@@ -477,10 +508,130 @@ fn set_local_cache_policy(
 }
 
 #[tauri::command]
-fn desktop_startup_status(
-    status: tauri::State<'_, DesktopStartupStatus>,
-) -> DesktopStartupStatus {
+fn desktop_startup_status(status: tauri::State<'_, DesktopStartupStatus>) -> DesktopStartupStatus {
     status.inner().clone()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopLoginRequest {
+    pub username: String,
+    pub password: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopLoginResult {
+    pub device_id: String,
+    pub client_instance_id: String,
+    pub expires_in: u64,
+}
+
+#[tauri::command]
+fn desktop_login(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    client: tauri::State<'_, SyncClient>,
+    store: tauri::State<'_, LocalStore>,
+    request: DesktopLoginRequest,
+) -> Result<DesktopLoginResult, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+
+    let registration = DeviceRegistrationRequest {
+        protocol_version: 1,
+        client_instance_id: store
+            .ensure_client_instance_id()
+            .map_err(|error| error.to_string())?,
+        display_name: "SkillHive Desktop".to_owned(),
+        platform: std::env::consts::OS.to_owned(),
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+    };
+    let session = client
+        .login(&request.username, &request.password, &registration)
+        .map_err(|error| error.to_string())?;
+    store
+        .record_device_registration(
+            &session.device.client_instance_id,
+            &session.device.device_id,
+            // server_user_id is not part of the login payload; the device
+            // registration response is scoped to the authenticated user, so
+            // record the display identity from the device row.
+            &session.device.client_instance_id,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(DesktopLoginResult {
+        device_id: session.device.device_id,
+        client_instance_id: session.device.client_instance_id,
+        expires_in: session.expires_in,
+    })
+}
+
+#[tauri::command]
+fn desktop_logout(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    client: tauri::State<'_, SyncClient>,
+) -> Result<(), String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    client
+        .clear_credentials()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn sync_now(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    client: tauri::State<'_, SyncClient>,
+    store: tauri::State<'_, LocalStore>,
+    blobs: tauri::State<'_, BlobStore>,
+) -> Result<SyncCycleReport, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    SyncEngine
+        .run_cycle(&client, &store, &blobs, "SkillHive Desktop")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn sync_state(store: tauri::State<'_, LocalStore>) -> Result<local_store::LocalSyncState, String> {
+    store.sync_state().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_conflicts(
+    store: tauri::State<'_, LocalStore>,
+) -> Result<Vec<local_store::ConflictRecord>, String> {
+    store.list_conflicts().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn resolve_conflict(
+    coordinator: tauri::State<'_, DesktopMutationCoordinator>,
+    store: tauri::State<'_, LocalStore>,
+    skill_id: String,
+    mode: String,
+    confirmed: bool,
+) -> Result<local_store::ResolutionApplied, String> {
+    let _guard = coordinator
+        .lock
+        .lock()
+        .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    match mode.as_str() {
+        "keep_local" => store
+            .resolve_keep_local(&skill_id, confirmed)
+            .map_err(|error| error.to_string()),
+        "keep_remote" => store
+            .resolve_keep_remote(&skill_id, confirmed)
+            .map_err(|error| error.to_string()),
+        other => Err(format!("unknown conflict resolution mode: {other}")),
+    }
 }
 
 fn cache_attempt(
@@ -579,7 +730,9 @@ fn reconcile_uninstall_recovery(
     store: &LocalStore,
     engine: &UninstallEngine,
 ) -> Result<UninstallStartupReport, String> {
-    let discovered = engine.recover_pending().map_err(|error| error.to_string())?;
+    let discovered = engine
+        .recover_pending()
+        .map_err(|error| error.to_string())?;
     let mut report = UninstallStartupReport {
         discovered: discovered.pending.len(),
         rolled_back: 0,
@@ -618,13 +771,43 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let data_dir = app.path().app_local_data_dir()?;
+            // M4: structured telemetry first so every later startup event is
+            // captured. Log-write failures never affect correctness.
+            telemetry::init(data_dir.join("logs").join("skillhive.log"));
+            telemetry::event("startup_begin", &[]);
             let store = LocalStore::open(data_dir.join("skillhive.sqlite3"))?;
             let recovered_in_flight_mutations = store.recover_in_flight_mutations()?;
+            // M3 offline-policy reconciliation: expire any entitlement whose
+            // deadline passed while the app was closed, before the caches and
+            // agent reconciliation can act on now-stale content.
+            let expired_entitlements = store.expire_due_entitlements(chrono::Utc::now())?;
             let blobs = BlobStore::open(data_dir.join("blobs"))?;
             let workspaces = WorkspaceStore::open(data_dir.join("workspaces"))?;
             let deployment = DeploymentEngine::open(data_dir.join("deployment-journal"))?;
             let uninstall = UninstallEngine::open(data_dir.join("uninstall-journal"))?;
             let mut deployment_recovery = deployment.recover_incomplete(&blobs)?;
+            // M4: deployment-recovery diagnostics (transaction IDs + counts).
+            if !deployment_recovery.catalog_commits.is_empty()
+                || !deployment_recovery.failed.is_empty()
+            {
+                telemetry::event(
+                    "deployment_recovery",
+                    &[
+                        (
+                            "rolled_forward",
+                            &deployment_recovery.catalog_commits.len().to_string(),
+                        ),
+                        (
+                            "rolled_back",
+                            &deployment_recovery.rolled_back.to_string(),
+                        ),
+                        (
+                            "failed",
+                            &deployment_recovery.failed.len().to_string(),
+                        ),
+                    ],
+                );
+            }
 
             for recovered in deployment_recovery.catalog_commits.clone() {
                 // DeploymentEngine already verified before roll-forward. Verify
@@ -676,10 +859,22 @@ pub fn run() {
                     cleaned_intents: 0,
                     failed: vec![error],
                 });
+            // M4: uninstall-recovery diagnostics (counts only).
+            if uninstall_recovery.discovered > 0 || !uninstall_recovery.failed.is_empty() {
+                telemetry::event(
+                    "uninstall_recovery",
+                    &[
+                        ("discovered", &uninstall_recovery.discovered.to_string()),
+                        ("rolled_back", &uninstall_recovery.rolled_back.to_string()),
+                        ("finalized", &uninstall_recovery.finalized.to_string()),
+                        ("failed", &uninstall_recovery.failed.len().to_string()),
+                    ],
+                );
+            }
 
             let registry = AgentRegistry::builtin();
             let agent_results = discover_and_reconcile_agents(&store, &registry)?;
-            let agent_reconciliation_errors = agent_results
+            let agent_reconciliation_errors: Vec<String> = agent_results
                 .into_iter()
                 .filter_map(|result| {
                     result
@@ -691,19 +886,87 @@ pub fn run() {
             let (cache_enforcement, cache_error) = cache_attempt(&store, &blobs);
             let local_store = store.health()?;
 
+            // Background sync triggers (plan §13): startup cycle, a slow
+            // heartbeat, and pokes from local commits / explicit requests.
+            // Correctness stays in SQLite; the worker holds no state.
+            //
+            // The worker thread outlives the setup closure, so it cannot
+            // borrow the managed values directly. The worker only needs
+            // the same *state* (SQLite DB, blob root, credential store),
+            // not the same object: LocalStore/BlobStore opening a second
+            // handle to the same paths is safe (SQLite WAL + busy_timeout,
+            // content-addressed idempotent blob writes), so the worker
+            // opens its own handles to the same directories.
+            let worker_store = match LocalStore::open(data_dir.join("skillhive.sqlite3")) {
+                Ok(worker_store) => worker_store,
+                Err(error) => return Err(error.into()),
+            };
+            let worker_blobs = match BlobStore::open(data_dir.join("blobs")) {
+                Ok(worker_blobs) => worker_blobs,
+                Err(error) => return Err(error.into()),
+            };
+            let worker_client = SyncClient::new(
+                &std::env::var("SKILLHIVE_SERVER_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
+            )?;
+            let sync_handle = spawn_sync_worker(
+                Arc::new(worker_client),
+                Arc::new(worker_store),
+                Arc::new(worker_blobs),
+                "SkillHive Desktop",
+            );
+
             app.manage(store);
             app.manage(blobs);
+            app.manage(SyncClient::new(
+                &std::env::var("SKILLHIVE_SERVER_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned()),
+            )?);
             app.manage(workspaces);
             app.manage(deployment);
             app.manage(uninstall);
             app.manage(registry);
             app.manage(DesktopMutationCoordinator::default());
+            app.manage(sync_handle);
+            // M4: one structured startup summary. Counts and IDs only —
+            // never tokens, secrets, or skill bodies. Computed before the
+            // managed struct below consumes the owned values.
+            telemetry::event(
+                "startup_complete",
+                &[
+                    (
+                        "recovered_mutations",
+                        &recovered_in_flight_mutations.to_string(),
+                    ),
+                    (
+                        "deployment_recovered",
+                        &deployment_recovery.catalog_commits.len().to_string(),
+                    ),
+                    (
+                        "deployment_failed",
+                        &deployment_recovery.failed.len().to_string(),
+                    ),
+                    (
+                        "expired_entitlements",
+                        &expired_entitlements.len().to_string(),
+                    ),
+                    (
+                        "agent_reconciliation_errors",
+                        &agent_reconciliation_errors.len().to_string(),
+                    ),
+                    (
+                        "cache_error",
+                        if cache_error.is_some() { "1" } else { "0" },
+                    ),
+                ],
+            );
             app.manage(DesktopStartupStatus {
                 local_store,
                 recovered_in_flight_mutations,
                 deployment_recovery,
                 uninstall_recovery,
                 agent_reconciliation_errors,
+                expired_entitlements,
                 cache_enforcement,
                 cache_error,
             });
@@ -722,7 +985,13 @@ pub fn run() {
             uninstall_skill_from_agent,
             enforce_local_cache,
             set_local_cache_policy,
-            desktop_startup_status
+            desktop_startup_status,
+            desktop_login,
+            desktop_logout,
+            sync_now,
+            sync_state,
+            list_conflicts,
+            resolve_conflict
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SkillHive desktop application");

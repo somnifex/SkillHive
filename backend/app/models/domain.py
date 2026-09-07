@@ -219,7 +219,21 @@ class SkillTemplate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class GroupSkillGrant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "group_skill_grants"
-    __table_args__ = (UniqueConstraint("group_id", "skill_id", name="uq_group_skill_grant"),)
+    __table_args__ = (
+        UniqueConstraint("group_id", "skill_id", name="uq_group_skill_grant"),
+        CheckConstraint(
+            "offline_policy IN ('unlimited', 'ttl', 'disabled')",
+            name="ck_grant_offline_policy_allowed",
+        ),
+        CheckConstraint(
+            "offline_ttl_hours IS NULL OR offline_ttl_hours >= 1",
+            name="ck_grant_offline_ttl_hours_positive",
+        ),
+        CheckConstraint(
+            "(offline_policy = 'ttl') = (offline_ttl_hours IS NOT NULL)",
+            name="ck_grant_offline_ttl_pairing",
+        ),
+    )
 
     group_id: Mapped[str] = mapped_column(
         ForeignKey("groups.id", ondelete="CASCADE"),
@@ -231,6 +245,12 @@ class GroupSkillGrant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     version_policy: Mapped[str] = mapped_column(String(20), default="latest")
     locked_version_id: Mapped[str | None] = mapped_column(ForeignKey("skill_versions.id"))
+    # M3 offline entitlement policy (handoff §15.1): how long a member may
+    # keep using this managed skill after losing server contact —
+    # ``unlimited`` (default), ``ttl`` bound by ``offline_ttl_hours``, or
+    # ``disabled`` (no offline window at all).
+    offline_policy: Mapped[str] = mapped_column(String(20), default="unlimited", nullable=False)
+    offline_ttl_hours: Mapped[int | None] = mapped_column()
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
     granted_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

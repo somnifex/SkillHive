@@ -859,6 +859,18 @@ pub fn run() {
                     cleaned_intents: 0,
                     failed: vec![error],
                 });
+            // M4: uninstall-recovery diagnostics (counts only).
+            if uninstall_recovery.discovered > 0 || !uninstall_recovery.failed.is_empty() {
+                telemetry::event(
+                    "uninstall_recovery",
+                    &[
+                        ("discovered", &uninstall_recovery.discovered.to_string()),
+                        ("rolled_back", &uninstall_recovery.rolled_back.to_string()),
+                        ("finalized", &uninstall_recovery.finalized.to_string()),
+                        ("failed", &uninstall_recovery.failed.len().to_string()),
+                    ],
+                );
+            }
 
             let registry = AgentRegistry::builtin();
             let agent_results = discover_and_reconcile_agents(&store, &registry)?;

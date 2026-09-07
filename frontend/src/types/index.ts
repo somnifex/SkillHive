@@ -132,3 +132,14 @@ export interface AuditLog {
   result: string;
   created_at: string;
 }
+
+export interface SystemSettings {
+  blob_storage_backend: "local" | "s3";
+  s3_endpoint_url: string | null;
+  s3_bucket: string | null;
+  s3_prefix: string;
+  s3_region: string | null;
+  s3_credentials_configured: boolean;
+  allow_registration: boolean;
+  max_package_bytes: number | null;
+}

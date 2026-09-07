@@ -14,6 +14,9 @@ class SystemSettingsRead(BaseModel):
     s3_credentials_configured: bool
     allow_registration: bool
     max_package_bytes: int | None
+    # Days a soft-deleted skill stays in the trash before automatic purge.
+    # 0 disables automatic purging entirely (manual purge only).
+    trash_retention_days: int
 
 
 class SystemSettingsUpdate(BaseModel):
@@ -24,6 +27,7 @@ class SystemSettingsUpdate(BaseModel):
     s3_region: str | None = Field(default=None, max_length=64)
     allow_registration: bool | None = None
     max_package_bytes: int | None = Field(default=None, ge=1)
+    trash_retention_days: int | None = Field(default=None, ge=0, le=3650)
 
 
 class AdminUserCreate(BaseModel):

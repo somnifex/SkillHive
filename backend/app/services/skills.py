@@ -155,6 +155,42 @@ class PrivateSkillService:
         self.mutations.soft_delete(skill, audit_action="private_skill.deleted")
         self.session.commit()
 
+    def trash_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        query: str | None,
+    ) -> Page[SkillRead]:
+        items, total = self.repository.list_private_trash(
+            self.user.id, page=page, page_size=page_size, query=query
+        )
+        return Page[SkillRead](
+            items=[self._read(skill, include_content=False) for skill in items],
+            page=page,
+            page_size=page_size,
+            total=total,
+            pages=ceil(total / page_size) if total else 0,
+        )
+
+    def restore(self, skill_id: str) -> SkillRead:
+        skill = self.repository.private_trashed_for_owner(skill_id, self.user.id)
+        if skill is None:
+            raise AppError("SKILL_NOT_FOUND", "Skill was not found in the trash.", 404)
+        restored = self.mutations.restore_skill(skill, audit_action="private_skill.restored")
+        self.session.commit()
+        return self._read(restored)
+
+    def purge(self, skill_id: str) -> None:
+        skill = self.repository.private_trashed_for_owner(skill_id, self.user.id)
+        if skill is None:
+            raise AppError("SKILL_NOT_FOUND", "Skill was not found in the trash.", 404)
+        self.mutations.purge_skill(skill, audit_action="private_skill.purged")
+        self.session.commit()
+
+    def categories(self) -> list[str]:
+        return self.repository.private_categories(self.user.id)
+
     def _owned(self, skill_id: str) -> Skill:
         skill = self.repository.private_for_owner(skill_id, self.user.id)
         if skill is None:

@@ -52,6 +52,29 @@ def create_skill(
     return PrivateSkillService(session, user).create(data)
 
 
+# Static paths must be declared before the /{skill_id} routes so FastAPI does
+# not swallow them as a skill id.
+@router.get("/categories", response_model=list[str])
+def list_categories(
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> list[str]:
+    return PrivateSkillService(session, user).categories()
+
+
+@router.get("/trash", response_model=Page[SkillRead])
+def list_trash(
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+    query: Annotated[str | None, Query(max_length=120)] = None,
+) -> Page[SkillRead]:
+    return PrivateSkillService(session, user).trash_page(
+        page=page, page_size=page_size, query=query
+    )
+
+
 @router.get("/{skill_id}", response_model=SkillRead)
 def get_skill(
     skill_id: str,
@@ -78,6 +101,26 @@ def delete_skill(
     session: Annotated[Session, Depends(get_db)],
 ) -> Response:
     PrivateSkillService(session, user).delete(skill_id)
+    return Response(status_code=204)
+
+
+@router.post("/{skill_id}/restore", response_model=SkillRead)
+def restore_skill(
+    skill_id: str,
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> SkillRead:
+    return PrivateSkillService(session, user).restore(skill_id)
+
+
+@router.delete("/{skill_id}/purge", status_code=204)
+def purge_skill(
+    skill_id: str,
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> Response:
+    """Permanently deletes a trashed skill (irreversible)."""
+    PrivateSkillService(session, user).purge(skill_id)
     return Response(status_code=204)
 
 

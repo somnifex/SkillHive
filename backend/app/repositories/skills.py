@@ -19,13 +19,26 @@ class SkillRepository:
             )
         )
 
+    def private_trashed_for_owner(self, skill_id: str, owner_id: str) -> Skill | None:
+        """Resolves only a trashed skill; active skills never purge/restore."""
+        return self.session.scalar(
+            select(Skill).where(
+                Skill.id == skill_id,
+                Skill.skill_type == "private",
+                Skill.owner_user_id == owner_id,
+                Skill.status == "deleted",
+            )
+        )
+
     def slug_exists(self, owner_id: str, slug: str) -> bool:
+        # Deliberately NOT status-filtered: the (owner, slug) unique constraint
+        # spans trashed rows too, so the guard must match the constraint or an
+        # insert would crash with a 500 instead of a clean 409.
         return (
             self.session.scalar(
                 select(Skill.id).where(
                     Skill.owner_user_id == owner_id,
                     Skill.slug == slug,
-                    Skill.status != "deleted",
                 )
             )
             is not None
@@ -73,6 +86,50 @@ class SkillRepository:
             )
         )
         return items, total
+
+    def list_private_trash(
+        self,
+        owner_id: str,
+        *,
+        page: int,
+        page_size: int,
+        query: str | None,
+    ) -> tuple[list[Skill], int]:
+        statement: Select[tuple[Skill]] = select(Skill).where(
+            Skill.skill_type == "private",
+            Skill.owner_user_id == owner_id,
+            Skill.status == "deleted",
+        )
+        if query:
+            pattern = f"%{query.strip()}%"
+            statement = statement.where(
+                or_(Skill.name.ilike(pattern), Skill.description.ilike(pattern))
+            )
+        total = self.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+        items = list(
+            self.session.scalars(
+                statement
+                .order_by(desc(Skill.deleted_at))
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
+        return items, total
+
+    def private_categories(self, owner_id: str) -> list[str]:
+        """Distinct non-empty categories across the owner's active skills."""
+        rows = self.session.execute(
+            select(Skill.category)
+            .where(
+                Skill.skill_type == "private",
+                Skill.owner_user_id == owner_id,
+                Skill.status != "deleted",
+                Skill.category != "",
+            )
+            .distinct()
+            .order_by(asc(Skill.category))
+        ).scalars()
+        return list(rows)
 
     def version(self, version_id: str | None) -> SkillVersion | None:
         return self.session.get(SkillVersion, version_id) if version_id else None

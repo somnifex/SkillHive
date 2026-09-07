@@ -370,6 +370,12 @@ class SkillMutationService:
             self._emit_change_event(skill, operation="upsert")
 
     def soft_delete(self, skill: Skill, *, audit_action: str) -> None:
+        """Moves a skill into the trash (recycle bin).
+
+        The row stays addressable by id (restore/purge need it) but every
+        list feed filters ``status == 'deleted'``, and the emitted tombstone
+        removes the skill from desktop mirrors.
+        """
         before = {
             "name": skill.name,
             "status": skill.status,
@@ -391,6 +397,56 @@ class SkillMutationService:
         )
         if deleted:
             self._emit_change_event(skill, operation="delete")
+
+    def restore_skill(self, skill: Skill, *, audit_action: str) -> Skill:
+        """Moves a trashed skill back into the active list.
+
+        Restored skills return as ``draft`` regardless of their previous
+        status so a delete/restore round trip can never silently republish
+        content. The emitted ``upsert`` event re-creates the mirror on any
+        desktop that already applied the delete tombstone.
+        """
+        if skill.status != "deleted":
+            raise AppError("SKILL_NOT_DELETED", "Only deleted skills can be restored.", 409)
+        skill.status = "draft"
+        skill.deleted_at = None
+        skill.sync_revision += 1
+        write_audit(
+            self.session,
+            actor_user_id=self.actor_user_id,
+            action=audit_action,
+            resource_type="skill",
+            resource_id=skill.id,
+            after_data={"status": "draft", "revision": skill.sync_revision},
+        )
+        self._emit_change_event(skill, operation="upsert")
+        return skill
+
+    def purge_skill(self, skill: Skill, *, audit_action: str) -> None:
+        """Permanently removes a trashed skill and all of its versions.
+
+        Only tombstoned (deleted) skills may be purged, so an accidental
+        purge cannot bypass the trash. The skill row cascades to its
+        versions; unreferenced blobs are reclaimed later by the existing
+        mark-and-sweep GC. A second tombstone is emitted first so desktop
+        mirrors that missed the soft-delete event still clean up.
+        """
+        if skill.status != "deleted" or skill.deleted_at is None:
+            raise AppError(
+                "SKILL_NOT_DELETED",
+                "Only skills in the trash can be purged permanently.",
+                409,
+            )
+        write_audit(
+            self.session,
+            actor_user_id=self.actor_user_id,
+            action=audit_action,
+            resource_type="skill",
+            resource_id=skill.id,
+            after_data={"purged": True, "slug": skill.slug, "name": skill.name},
+        )
+        self._emit_change_event(skill, operation="delete")
+        self.session.delete(skill)
 
     def ensure_version_available(self, skill_id: str, version: str) -> None:
         exists = self.session.scalar(

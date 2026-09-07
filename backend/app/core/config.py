@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = [
         "http://127.0.0.1:5173",
         "http://localhost:5173",
+        # Tauri 2 WebView origins (Windows uses http, macOS/Linux tauri://);
+        # without these the desktop login preflight is rejected.
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "tauri://localhost",
     ]
     cookie_secure: bool = False
     login_max_attempts: int = 5

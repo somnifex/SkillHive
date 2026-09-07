@@ -30,15 +30,20 @@ impl Default for SnapshotPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillSnapshotManifest {
+    #[serde(alias = "format_version")]
     pub format_version: u32,
     pub files: Vec<SkillSnapshotFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillSnapshotFile {
     pub path: String,
+    #[serde(alias = "blob_hash")]
     pub blob_hash: String,
+    #[serde(alias = "size_bytes")]
     pub size_bytes: u64,
 }
 
@@ -608,5 +613,30 @@ mod tests {
         for path in ["CON", "scripts/a:b.py", "trailing."] {
             assert!(portable_path_to_relative(path).is_err(), "{path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod compat_tests {
+    use super::*;
+
+    /// The server synthesizes legacy packages with camelCase manifest keys
+    /// (blobHash/sizeBytes); the desktop historically wrote snake_case. Both
+    /// must deserialize, or pulled skills can never hydrate/deploy.
+    #[test]
+    fn manifest_accepts_server_camel_case_and_desktop_snake_case() {
+        let camel = r#"{"format_version":1,"files":[{"path":"SKILL.md","blobHash":"sha256:aa","sizeBytes":5}]}"#;
+        let snake = r#"{"format_version":1,"files":[{"path":"SKILL.md","blob_hash":"sha256:aa","size_bytes":7}]}"#;
+        let from_camel: SkillSnapshotManifest = serde_json::from_str(camel).expect("camelCase");
+        let from_snake: SkillSnapshotManifest = serde_json::from_str(snake).expect("snake_case");
+        assert_eq!(from_camel.files[0].blob_hash, "sha256:aa");
+        assert_eq!(from_camel.files[0].size_bytes, 5);
+        assert_eq!(from_snake.files[0].blob_hash, "sha256:aa");
+
+        // Serialization stays camelCase so what the desktop writes matches
+        // the server projection.
+        let encoded = serde_json::to_string(&from_camel).expect("serialize");
+        assert!(encoded.contains("blobHash"));
+        assert!(encoded.contains("sizeBytes"));
     }
 }

@@ -1,10 +1,104 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeOff } from "lucide-react";
-import { App, Avatar, Button, Card, Descriptions, Form, Input, Switch, Typography } from "antd";
+import {
+  App,
+  Avatar,
+  Button,
+  Card,
+  Descriptions,
+  Form,
+  Input,
+  Popconfirm,
+  Switch,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
 
 import { api, errorMessage } from "../api/client";
+import {
+  hasDesktopCommands,
+  listConflicts,
+  resolveConflict,
+  type DesktopConflict,
+} from "../api/desktop";
 import { PageHeader } from "../components/PageHeader";
 import { useAppearanceStore, useAuthStore } from "../stores/auth";
+
+function ConflictCenter() {
+  const { message } = App.useApp();
+  const queryClient = useQueryClient();
+  const conflicts = useQuery({
+    queryKey: ["desktop-conflicts"],
+    queryFn: listConflicts,
+    refetchInterval: 30_000,
+  });
+  const resolve = useMutation({
+    mutationFn: (input: { skillId: string; mode: "keep_local" | "keep_remote" }) =>
+      resolveConflict(input.skillId, input.mode, true),
+    onSuccess: () => {
+      message.success("冲突已解决");
+      void queryClient.invalidateQueries({ queryKey: ["desktop-conflicts"] });
+      void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      void queryClient.invalidateQueries({ queryKey: ["desktop-sync-state"] });
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : errorMessage(error)),
+  });
+
+  const rows = conflicts.data ?? [];
+  return (
+    <Card title="同步冲突">
+      <Typography.Paragraph type="secondary">
+        当本地未同步的修改与服务器变更冲突时会记录在这里，任一方都不会被静默覆盖。
+      </Typography.Paragraph>
+      {rows.length === 0 ? (
+        <Typography.Text type="secondary">没有待解决的冲突。</Typography.Text>
+      ) : (
+        <Table
+          rowKey="skillId"
+          size="small"
+          pagination={false}
+          dataSource={rows}
+          columns={[
+            { title: "本地名称", dataIndex: "localName", ellipsis: true },
+            { title: "本地 Slug", dataIndex: "localSlug" },
+            {
+              title: "远端版本",
+              dataIndex: "remoteHeadRevision",
+              render: (value: number | null) => value ?? "未知",
+            },
+            {
+              title: "状态",
+              render: () => <Tag color="warning">待解决</Tag>,
+            },
+            {
+              title: "处理",
+              width: 220,
+              render: (_: unknown, record: DesktopConflict) => (
+                <>
+                  <Popconfirm
+                    title="保留本地版本？"
+                    description="服务器版本将被本机版本覆盖并推送。"
+                    onConfirm={() => resolve.mutate({ skillId: record.skillId, mode: "keep_local" })}
+                  >
+                    <Tag style={{ cursor: "pointer" }}>保留本地</Tag>
+                  </Popconfirm>
+                  <Popconfirm
+                    title="采用服务器版本？"
+                    description="本机未同步的修改将被放弃。"
+                    onConfirm={() => resolve.mutate({ skillId: record.skillId, mode: "keep_remote" })}
+                  >
+                    <Tag style={{ cursor: "pointer" }}>保留服务器</Tag>
+                  </Popconfirm>
+                </>
+              ),
+            },
+          ]}
+        />
+      )}
+    </Card>
+  );
+}
 
 export function SettingsPage() {
   const { message } = App.useApp();
@@ -93,6 +187,7 @@ export function SettingsPage() {
             </Button>
           </Form>
         </Card>
+        {hasDesktopCommands() && <ConflictCenter />}
       </div>
     </>
   );

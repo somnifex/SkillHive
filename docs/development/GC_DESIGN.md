@@ -1,6 +1,6 @@
 # SkillHive Garbage Collection Design (M2.2, plan §9.7)
 
-Status: **DESIGN — destructive GC deliberately deferred; storage design already supports it.**
+Status: **IMPLEMENTED (2026-09-06, commit `a4f28c3`)** — `blob_gc.py` (destructive mark-and-sweep), `sync_trim.py`, the four retention settings and the `SYNC_CURSOR_EXPIRED` contract are live with unit tests. **Production scheduling is still missing**: `run_blob_gc` / `trim_expired_rows` have no caller in `main.py` (only the trash-retention sweep is scheduled), so orphan blobs are reclaimed only by manual runs — tracked in CURRENT_STATUS known issues.
 
 This document is the M2.2 leftover for Issue #7. It specifies the blob
 garbage-collection contract for both storage roots (server package store and
@@ -135,7 +135,7 @@ Receipt retention follows the same window (`receipt_retention_days = 90`
 proposed). Receipts older than the window lose replay idempotency for
 extremely late retries; that is acceptable only because the desktop already
 retires `acked` mutations locally and never replays them after the retention
-horizon. Until the setting lands, receipts are retained indefinitely — the
+horizon. The settings landed (`change_log_retention_days` / `receipt_retention_days`, config.py); enforcement now only needs the scheduled run — the
 conservative default.
 
 ## 7. Desktop cache GC (already implemented and unit-validated)
@@ -183,7 +183,7 @@ def run_blob_gc(session, storage, *, now, orphan_grace, change_retention, receip
     # caller commits; job is safe to re-run
 ```
 
-Proposed settings (to be added to `app.core.config.Settings` when the job
+Settings (all landed in config.py) (to be added to `app.core.config.Settings` when the job
 lands; none exist yet, all defaults conservative):
 
 ```python

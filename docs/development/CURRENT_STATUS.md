@@ -110,6 +110,79 @@ Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
 - PostgreSQL/MySQL migration re-validation still bypassed per owner
   instruction (no server available) — unchanged from the standing record.
 
+### Landed 2026-09-07 (desktop productization, branch `feat/desktop-productization`)
+
+Owner-requested product package closing three feedback items (no visible
+upload path, "why is this a web page", management gaps):
+
+- **NSIS packaging** (`tauri.conf.json` `bundle.active=true`, zh/en NSIS,
+  `icons/icon.ico`): `pnpm tauri build` now emits a Windows installer; the
+  desktop app is the primary product form while the web build keeps working.
+- **Agent deployment surfaced in UI**: built-in adapters extended to 12
+  (+ Cursor `~/.cursor/skills`, Windsurf `~/.windsurf/skills`, Trae
+  `~/.trae/skills`, ZCode `~/.zcode/skills`; conventional paths, verify
+  against vendor docs if a target disagrees). New `/agents` page: discovery
+  cards, enable toggles, custom directories, global default deploy targets,
+  deployments table with uninstall. SkillsPage rows gain deploy (modal with
+  per-skill override persisted in new `deployment_prefs` local-store v5
+  table), hydrate ("下载到本地"), and batch deploy/delete; pagination bug
+  fixed (server-side page param wired).
+- **Workspace hydration (closes M2.5 leftover)**: new `hydrate_skill`
+  engine + `hydrate_skill_workspace` command materialize a pulled
+  `remote_only` skill's snapshot closure (verified blob downloads) and its
+  managed workspace; deploy commands auto-hydrate first. Pulled skills are
+  now deployable end to end.
+- **Sync/conflict surfaces**: top-bar SyncStatus chip (last push/pull,
+  server-error badge, 立即同步), desktop-only conflict center in Settings
+  (`list_conflicts` + keep_local/keep_remote).
+- **Trash lifecycle (server)**: soft delete = recycle bin;
+  `GET /skills/trash`, `POST /skills/{id}/restore` (returns as draft),
+  `DELETE /skills/{id}/purge` (versions cascade; blobs reclaimed by GC);
+  admin setting `trash_retention_days` (default 30, `0`=manual only) with a
+  daily background sweep (savepoint-per-row). `slug_exists` guard fixed to
+  match the (owner, slug) unique constraint (409 instead of 500 on
+  trash-reserved slugs).
+- **Version management**: `skill_versions.tags` JSON column (migration
+  `a9b0c1d2e3f4`), `PUT .../versions/{version}/tags` (unique per skill),
+  `POST /skills/{id}/rollback` (mints a NEW patch version from an old
+  content — additive, never a history rewrite), `GET .../versions/{version}/export`
+  portable zip; version drawer UI with tag editor / rollback / download.
+
+Validation truth (2026-09-07, local): backend ruff/mypy clean + **pytest 134
+passed**; Alembic fresh → `a9b0c1d2e3f4`, downgrade/upgrade round-trip
+verified; frontend lint/typecheck/test/build green; `cargo fmt --check`,
+`cargo clippy -D warnings` clean, `cargo test --lib` **116 passed**
+(includes hydration + deployment-prefs suites). PostgreSQL/MySQL re-validation
+remains bypassed per owner instruction.
+
+### Live end-to-end validation (2026-09-08, local server + release client)
+
+Ran the full product loop against `uvicorn` (SQLite, port 8000) and the
+built `skillhive-desktop.exe`, driven through the GUI:
+
+- **Fixed during testing (3 real bugs):** desktop WebView CORS preflight
+  rejected (`http://tauri.localhost` missing from `cors_origins`); sync
+  device never registered because `desktop_login` had no UI caller (login
+  page now registers the device + triggers an immediate cycle; logout clears
+  keyring); server camelCase manifests (`blobHash`/`sizeBytes`) rejected by
+  the desktop snapshot reader so pulled skills could never hydrate/deploy
+  (manifest deserializes both spellings now, unit-tested); sync chip showed
+  "8 hours ago" on UTC+8 (SQLite CURRENT_TIMESTAMP parsed as local time).
+- **Verified live:** register + login (web session + device registration);
+  skill creation from the UI; pull landing the skill locally (`remote_only`);
+  hydration ("下载到本地" → `remote_only`→`synced`, workspace + SKILL.md
+  materialized); **one-click deploy to both `~/.zcode/skills/literature-review`
+  and `~/.codex/skills/literature-review` with correct SKILL.md content**;
+  Agent 部署 page (12 adapters discovered per directory presence, enable
+  toggles, deployment table showing both targets 已安装); trash lifecycle
+  (delete → trash tab with delete-time → restore as draft → strong-confirm
+  purge → 404); version tags (stable on 0.1.0, 409 on tag clash), rollback
+  (mints 0.1.1 "回滚自 0.1.0"), per-version zip export (SKILL.md inside).
+- Sync worker cycles healthy throughout (ok, 72-98ms per cycle).
+- Remaining known cosmetic: session loss on WebView reload (access-token
+  expiry drops the web session while keyring credentials persist) — user
+  re-logs in; recording as known issue.
+
 ## Current milestone state
 
 | Milestone | Current state |
@@ -119,10 +192,10 @@ Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
 | M2 Cloud sync epic (#4) | IN PROGRESS |
 | M2.0 Shared Skill mutation path (#5) | CODE COMPLETE — backend validated locally (see validation truth) |
 | M2.1 Protocol/schema foundation (#6) | IN PROGRESS — SQLite-validated; PostgreSQL/MySQL bypassed by owner instruction |
-| M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc landed (`docs/development/GC_DESIGN.md`, destructive sweep deliberately deferred) |
+| M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc landed and the destructive sweep + cursor-expiry contract are implemented with unit tests (`a4f28c3`), **but `run_blob_gc`/`trim_expired_rows` have no production scheduler yet — see known issues** |
 | M2.3 Device identity/secure credentials (#8) | CODE COMPLETE — server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
 | M2.4 Idempotent push (#9) | CODE COMPLETE (desktop) — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed |
-| M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration deferred until a consumer needs it |
+| M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; **workspace hydration landed 2026-09-07 on `feat/desktop-productization` (`hydrate_skill` + `hydrate_skill_workspace`, pulled skills deploy end to end)** |
 | M2.6 Desktop sync orchestrator (#11) | CODE COMPLETE (desktop) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake landed (`sync_worker.rs`) and validated live |
 | M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (desktop) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side AND live client-process scenarios validated 2026-09-06 (see validation truth)** |
 | M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED — grant offline policy (migration `c4d5e6f7a8b9`), signed JWT entitlement leases shipped in pull metadata, desktop schema-v4 entitlement store, pull-apply + startup + post-pull reconciliation landed (`b2165a7`, `b5be325`, `97fe35e`, `bef5977`); **live CDP scenarios validated 2026-09-07 (see validation truth)** |
@@ -130,27 +203,27 @@ Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
 
 ## Exact next task
 
-Continue on branch `feat/m2-continue`. M4 is in progress: the
-observability + migration-safety packages landed (see M4 state below).
-The remaining M4 work is the **fault-injection test package** (network
-loss / crash / duplicate / 5xx / auth-change / disk-full — mostly
-already covered live; needs pytest+cargo home in one recorded
-checklist), the **signed release/update process** (design-only given the
-local-only constraint), and the **release SLO/correctness gates** doc.
-Remaining M2 gaps stay record-only:
-
-1. **Workspaces/hydration polish (M2.5 leftover)** — pulled `remote_only`
-   records carry metadata + manifest only; workspace hydration (materialize
-   files from the blob closure) is deferred until a consumer needs it. This
-   also blocks deploying a pulled managed skill (manifest format mismatch —
-   recorded in the M3 validation run).
-2. **M2.2 destructive GC sweep** — design doc landed; implementation
-   deliberately deferred.
-3. **UI-side local-skill surface** — the WebView pages still use the legacy
-   REST/axios path; Tauri commands (`desktop_login`, `sync_now`, local
-   commit/deploy) are exposed but not yet consumed by React pages.
+1. **Merge/PR decision for `feat/desktop-productization`** (ahead of local
+   `main` by 12 commits, live-validated 2026-09-07/08 — see the
+   productization + live-validation sections above). Rebase on `main`,
+   open the PR when `origin` is reachable, merge after the checklist §42
+   scenarios that need a second machine are re-run.
+2. **Wire GC/trim into production scheduling** — `run_blob_gc`
+   (destructive mark-and-sweep) and `trim_expired_rows` are implemented with
+   unit tests (`a4f28c3`) and the `SYNC_CURSOR_EXPIRED` contract is live in
+   `sync_changes.py`, but **neither has a production caller**; today only the
+   trash-retention sweep is scheduled in `main.py`. Until wired in, purged
+   skills leave orphan blobs that only manual GC runs reclaim. Decide:
+   daily worker (alongside the trash sweep) or documented manual trigger.
+3. **Known issue — web session loss on WebView reload**: an expired access
+   token drops the REST session while keyring credentials persist; the user
+   must re-login. Either persist the access token behind the Rust boundary
+   or auto-restore the session from the device credential at startup.
 4. **PostgreSQL/MySQL migration re-validation** when a server becomes
    available (owner bypassed SQL-server flows, 2026-09-04).
+5. M4 remaining: fault-injection test package (mostly covered live; needs
+   the one recorded checklist), signed release/update process (design-only),
+   release SLO gates doc.
 
 ## M3 state (2026-09-07)
 

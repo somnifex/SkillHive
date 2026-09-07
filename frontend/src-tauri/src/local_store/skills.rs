@@ -59,6 +59,52 @@ impl LocalStore {
         }))
     }
 
+    /// Promotes a hydrated remote-only record: the snapshot closure is now
+    /// fully local and a managed workspace exists, so the record behaves
+    /// like a synced mirror of the server skill.
+    ///
+    /// Only a `remote_only` row may transition here. Pull apply is the sole
+    /// writer of that state, so the guarded update cannot clobber a local
+    /// edit that raced the hydration.
+    pub fn mark_skill_hydrated(
+        &self,
+        skill_id: &str,
+        workspace_path: &std::path::Path,
+    ) -> Result<LocalSkill, LocalStoreError> {
+        let mut connection = self.lock_connection()?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let workspace_path = super::path_to_string(workspace_path)?;
+        let changed = transaction.execute(
+            r#"
+            UPDATE local_skills
+            SET workspace_path = ?1, sync_state = 'synced', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?2 AND sync_state = 'remote_only'
+            "#,
+            rusqlite::params![workspace_path, skill_id],
+        )?;
+        if changed == 0 {
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT sync_state FROM local_skills WHERE id = ?1",
+                    [skill_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            return Err(match existing {
+                None => LocalStoreError::SkillNotFound(skill_id.to_owned()),
+                Some(state) => LocalStoreError::InvalidInput(format!(
+                    "skill {skill_id} in state {state} cannot be hydrated"
+                )),
+            });
+        }
+        transaction.commit()?;
+        drop(connection);
+
+        self.get_skill(skill_id)?
+            .ok_or_else(|| LocalStoreError::SkillNotFound(skill_id.to_owned()))
+    }
+
     /// Resolves a local skill row by its server-assigned id. The UI's skill
     /// lists come from the server, so export flows translate the remote id
     /// into the local row that carries the snapshot hash.

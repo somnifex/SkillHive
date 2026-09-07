@@ -1,3 +1,6 @@
+import asyncio
+import contextlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -13,6 +16,42 @@ from app.api.v1.router import router as api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.observability import RequestContextMiddleware, configure_logging
+from app.db.session import SessionLocal
+from app.services.trash_gc import purge_expired_trash
+
+logger = logging.getLogger("skillhive.trash")
+
+TRASH_SWEEP_INTERVAL_SECONDS = 24 * 60 * 60
+
+
+async def _trash_retention_worker() -> None:
+    """Daily trash retention sweep; runs once shortly after startup too.
+
+    The task owns its own short-lived session per run, so failures never leak
+    connections and never block the API event loop beyond one query.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(_sweep_once)
+        except Exception:  # noqa: BLE001 - the background sweep must never crash the app
+            logger.exception("trash retention sweep failed")
+        await asyncio.sleep(TRASH_SWEEP_INTERVAL_SECONDS)
+
+
+def _sweep_once() -> None:
+    with SessionLocal() as session:
+        purge_expired_trash(session)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    task = asyncio.create_task(_trash_retention_worker(), name="trash-retention-sweep")
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 def rate_limit_handler(request: Request, exc: Exception) -> Response:
@@ -28,10 +67,6 @@ def rate_limit_handler(request: Request, exc: Exception) -> Response:
         },
     )
 
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    yield
 
 
 def create_app() -> FastAPI:

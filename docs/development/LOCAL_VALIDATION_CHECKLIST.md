@@ -1,9 +1,9 @@
 # SkillHive Local Validation Checklist
 
-Last updated: 2026-09-04
+Last updated: 2026-09-08
 Validation mode: local developer machine only
 CI policy: do not use GitHub Actions unless the owner explicitly authorizes it
-Primary local continuation branch: `feat/m2-sync`
+Primary local continuation branch: `feat/desktop-productization`
 
 This checklist defines what must be executed before a milestone can move from `CODE COMPLETE / PENDING LOCAL VALIDATION` to `VERIFIED`.
 
@@ -21,7 +21,7 @@ Read `AGENTS.md` and `LOCAL_AGENT_HANDOFF.md` first.
 - Record exact toolchain versions and the first failing command before changing code.
 - Fix the implementation rather than weakening tests/constraints unless the design itself is proven wrong.
 - A passing fresh install does not validate an upgrade migration. Test both.
-- PR #3 has already been merged. The active continuation branch is now `feat/m2-sync`.
+- PR #3 has already been merged. The active continuation branch (2026-09-08) is `feat/desktop-productization`.
 
 ### Known flaky check (pre-existing, recorded 2026-09-07)
 
@@ -180,11 +180,15 @@ DATABASE_URL=sqlite:///./tmp/m2-fresh.db uv run alembic upgrade head
 DATABASE_URL=sqlite:///./tmp/m2-fresh.db uv run alembic current
 ```
 
-Expected Alembic head includes:
+Expected Alembic head (2026-09-08):
 
 ```text
-b6a31d0f4c9e
+a9b0c1d2e3f4
 ```
+
+Chain: `2e26577093dc → 7f4c2b8a91de → b6a31d0f4c9e → c4d5e6f7a8b9 →
+e8f1a2b3c4d5 → f7a8b9c0d1e2 → a9b0c1d2e3f4`. Re-check CURRENT_STATUS for
+the current head before judging a mismatch.
 
 Inspect tables/constraints with a local SQLite client or a short Python/SQLAlchemy script.
 
@@ -413,7 +417,7 @@ Do not add `Cargo.lock` to `.gitignore`.
 
 ## 17. Local SQLite migration chain
 
-Test a new DB reaches schema v3.
+Test a new DB reaches schema v5 (deployment_prefs; see local_store/migrations.rs LATEST_SCHEMA_VERSION).
 
 Also create representative schema-v1 and schema-v2 databases and reopen through current `LocalStore`.
 
@@ -666,7 +670,7 @@ Record the lockfile behavior. Preserve the existing package manager choice.
 
 ## 34. Desktop dev command
 
-The branch has not yet established a locally verified Tauri developer command.
+RESOLVED: the Tauri CLI is pinned in-repo and `pnpm exec tauri build` is validated (NSIS bundle produced 2026-09-07/08).
 
 Determine and document a reproducible path.
 
@@ -770,7 +774,41 @@ Known skipped scenarios and why:
 
 Do not write `verified` if mandatory scenarios were skipped.
 
-## 42. Current handoff state
+## 42. Desktop productization scenarios (`feat/desktop-productization`, 2026-09-07)
+
+Mandatory before recording the branch verified:
+
+1. **Agent deploy end to end (desktop)** — create a skill (web or desktop),
+   open 我的 Skills → 部署, pick Claude Code and ZCode targets, install;
+   verify `<target>/skills/<slug>/SKILL.md` exists and the 部署目录 page
+   lists both deployments; uninstall one and confirm the directory is gone.
+2. **Pulled-skill hydration** — from a second client (or server-created
+   skill), sync to the desktop, press 下载到本地 (hydrate), then deploy.
+   Failing this usually means the manifest closure was not local.
+3. **Trash lifecycle** — delete a skill → 回收站 tab shows it with the
+   delete time; restore returns it as draft; purge removes it permanently
+   (check the audit log). Set `trash_retention_days` in admin settings and
+   confirm the sweep purges only entries older than the window (`0` keeps
+   everything until manual purge).
+4. **Version tags/rollback/export** — tag a version, verify a second
+   version cannot claim the same tag (409), rollback mints a NEW patch
+   version with the old content, download-version zip contains SKILL.md.
+5. **Sync chip & conflicts** — 立即同步 in the top bar completes; if a
+   conflict exists, keep-local and keep-remote both resolve and clear the
+   Settings conflict card.
+6. **NSIS installer** — `pnpm tauri build` produces
+   `src-tauri/target/release/bundle/nsis/SkillHive_<version>_x64-setup.exe`;
+   install it, launch, log in against the local server, repeat scenario 1.
+
+Failure modes to watch for:
+
+- deploy fails with `not deployable in state remote_only` — the auto-hydrate
+  hook should have run; check the sync worker logged in and the server is
+  reachable (`hydrate_skill_workspace` needs the bearer token).
+- a custom profile whose directory is a symlink or relative path is rejected
+  by `validate_skill_root` — by design (Rust boundary).
+
+## 43. Handoff snapshot (historical, 2026-09-04)
 
 At the time this file was created:
 

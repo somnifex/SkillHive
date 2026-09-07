@@ -370,6 +370,12 @@ class SkillMutationService:
             self._emit_change_event(skill, operation="upsert")
 
     def soft_delete(self, skill: Skill, *, audit_action: str) -> None:
+        """Moves a skill into the trash (recycle bin).
+
+        The row stays addressable by id (restore/purge need it) but every
+        list feed filters ``status == 'deleted'``, and the emitted tombstone
+        removes the skill from desktop mirrors.
+        """
         before = {
             "name": skill.name,
             "status": skill.status,
@@ -392,6 +398,59 @@ class SkillMutationService:
         if deleted:
             self._emit_change_event(skill, operation="delete")
 
+    def restore_skill(self, skill: Skill, *, audit_action: str) -> Skill:
+        """Moves a trashed skill back into the active list.
+
+        Restored skills return as ``draft`` regardless of their previous
+        status so a delete/restore round trip can never silently republish
+        content. The emitted ``upsert`` event re-creates the mirror on any
+        desktop that already applied the delete tombstone.
+        """
+        if skill.status != "deleted":
+            raise AppError("SKILL_NOT_DELETED", "Only deleted skills can be restored.", 409)
+        skill.status = "draft"
+        skill.deleted_at = None
+        skill.sync_revision += 1
+        write_audit(
+            self.session,
+            actor_user_id=self.actor_user_id,
+            action=audit_action,
+            resource_type="skill",
+            resource_id=skill.id,
+            after_data={"status": "draft", "revision": skill.sync_revision},
+        )
+        self._emit_change_event(skill, operation="upsert")
+        return skill
+
+    def purge_skill(self, skill: Skill, *, audit_action: str) -> None:
+        """Permanently removes a trashed skill and all of its versions.
+
+        Only tombstoned (deleted) skills may be purged, so an accidental
+        purge cannot bypass the trash. The skill row cascades to its
+        versions; unreferenced blobs are reclaimed by the mark-and-sweep GC
+        (blob_gc.py) — which is implemented and unit-tested but currently
+        has no production scheduler, so reclamation happens on the next
+        manual/scheduled GC run rather than inline with the purge. A second
+        tombstone is emitted first so desktop mirrors that missed the
+        soft-delete event still clean up.
+        """
+        if skill.status != "deleted" or skill.deleted_at is None:
+            raise AppError(
+                "SKILL_NOT_DELETED",
+                "Only skills in the trash can be purged permanently.",
+                409,
+            )
+        write_audit(
+            self.session,
+            actor_user_id=self.actor_user_id,
+            action=audit_action,
+            resource_type="skill",
+            resource_id=skill.id,
+            after_data={"purged": True, "slug": skill.slug, "name": skill.name},
+        )
+        self._emit_change_event(skill, operation="delete")
+        self.session.delete(skill)
+
     def ensure_version_available(self, skill_id: str, version: str) -> None:
         exists = self.session.scalar(
             select(SkillVersion.id).where(
@@ -401,6 +460,125 @@ class SkillMutationService:
         )
         if exists is not None:
             raise AppError("VERSION_EXISTS", "This version already exists.", 409)
+
+    def _assert_version_tags_free(
+        self,
+        skill_id: str,
+        tags: list[str],
+        *,
+        exclude_version: str,
+    ) -> None:
+        if not tags:
+            return
+        wanted = set(tags)
+        rows = self.session.execute(
+            select(SkillVersion.version, SkillVersion.tags).where(
+                SkillVersion.skill_id == skill_id,
+                SkillVersion.version != exclude_version,
+            )
+        ).all()
+        for other_version, other_tags in rows:
+            clash = wanted.intersection(other_tags or [])
+            if clash:
+                raise AppError(
+                    "VERSION_TAG_TAKEN",
+                    f"Tag(s) {sorted(clash)} already label version {other_version}.",
+                    409,
+                )
+
+    def set_version_tags(
+        self,
+        skill: Skill,
+        version: SkillVersion,
+        *,
+        tags: list[str],
+        audit_action: str,
+    ) -> SkillVersion:
+        """Replaces the docker-style label set of one version.
+
+        A tag can label only one version per skill (like a docker tag), so the
+        replacement is rejected when another version already owns one of the
+        requested tags. Tags are presentation metadata: the revision bump keeps
+        desktop mirrors in sync but never touches packages.
+        """
+        if version.skill_id != skill.id:
+            raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
+        cleaned = list(dict.fromkeys(tag.strip() for tag in tags if tag.strip()))
+        self._assert_version_tags_free(skill.id, cleaned, exclude_version=version.version)
+
+        changed = version.tags != cleaned
+        version.tags = cleaned
+        if changed:
+            skill.sync_revision += 1
+        write_audit(
+            self.session,
+            actor_user_id=self.actor_user_id,
+            action=audit_action,
+            resource_type="skill",
+            resource_id=skill.id,
+            after_data={
+                "version": version.version,
+                "tags": cleaned,
+                "revision": skill.sync_revision,
+            },
+        )
+        if changed:
+            self._emit_change_event(skill, operation="upsert")
+        return version
+
+    def rollback_version(
+        self,
+        skill: Skill,
+        source: SkillVersion,
+        *,
+        change_log: str,
+        audit_action: str,
+    ) -> SkillVersion:
+        """Creates a new version carrying the source version's content.
+
+        Rollback is additive (like a re-mint), not a history rewrite: a new
+        semantic version carries the old payload and becomes the skill's
+        current version, so desktop pulls receive it as a normal forward
+        change and the audit trail stays append-only.
+        """
+        if source.skill_id != skill.id:
+            raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
+        version_name = self.next_patch_version(skill)
+        self.ensure_version_available(skill.id, version_name)
+
+        note = change_log or f"回滚自 {source.version}"
+        created = self._create_version_row(
+            skill=skill,
+            version=version_name,
+            revision=skill.sync_revision + 1,
+            content=dict(source.content),
+            manifest=dict(source.manifest) or {"name": skill.slug, "schema_version": 1},
+            package_manifest_hash=source.package_manifest_hash,
+            package_size_bytes=source.package_size_bytes,
+            dependency_config=dict(source.dependency_config or {}),
+            change_log=note,
+            status="draft",
+        )
+        skill.current_version_id = created.id
+        skill.current_package_hash = created.package_manifest_hash
+        skill.sync_revision += 1
+        if skill.status == "published":
+            skill.status = "draft"
+
+        write_audit(
+            self.session,
+            actor_user_id=self.actor_user_id,
+            action=audit_action,
+            resource_type="skill",
+            resource_id=skill.id,
+            after_data={
+                "rollback_from": source.version,
+                "version": created.version,
+                "revision": skill.sync_revision,
+            },
+        )
+        self._emit_change_event(skill, operation="upsert")
+        return created
 
     def next_patch_version(self, skill: Skill) -> str:
         if skill.current_version_id is None:

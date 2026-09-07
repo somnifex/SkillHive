@@ -2,7 +2,7 @@
 
 Status captured: 2026-09-04
 Repository: `somnifex/SkillHive`
-Development branch: `feat/desktop-foundation`
+Development branch: `feat/desktop-productization` (supersedes `feat/desktop-foundation`)
 Integration PR: #3 (Draft)
 
 This document is the engineering handoff for a local development agent. It records the target architecture, what has actually been implemented, what has only been planned, known unverified risks, and the exact order in which development should continue.
@@ -43,6 +43,14 @@ Claude / Codex / Gemini / OpenCode / OpenClaw / custom Agent Skill directories
 
 The branch is ahead of `main` and was not behind `main` at the handoff checkpoint. `main` has intentionally not been modified directly.
 
+As of 2026-09-07 the productization branch `feat/desktop-productization`
+(from `main`) closes the three owner-reported gaps: NSIS installer + desktop
+shell, one-click agent deployment UI (12 built-in targets + custom
+directories + global/per-skill defaults), hydration-then-deploy for pulled
+skills, sync/conflict surfaces, server-side trash lifecycle with admin
+retention, and version tags/rollback/export. See CURRENT_STATUS.md for the
+validation truth and LOCAL_VALIDATION_CHECKLIST.md §42 for the scenario list.
+
 No GitHub Actions workflow is enabled for this development phase.
 
 ---
@@ -52,18 +60,18 @@ No GitHub Actions workflow is enabled for this development phase.
 | Milestone | Status | GitHub | Meaning |
 | --- | --- | --- | --- |
 | M0 Desktop/architecture foundation | COMPLETE | tracked by #1 | Architecture and desktop shell established |
-| M1 Durable local desktop core | CODE COMPLETE / PENDING LOCAL VALIDATION | #2 | Static-reviewed implementation exists; not executed locally yet |
+| M1 Durable local desktop core | CODE COMPLETE / UNIT-VALIDATED | #2 | cargo suite green since 2026-09-05 (31→107→116 tests); live E2E partially validated 2026-09-08 |
 | M2 Cloud sync epic | IN PROGRESS | #4 | Detailed design and issue breakdown exist |
 | M2.0 Shared server mutation path | CODE COMPLETE / PENDING LOCAL VALIDATION | #5 | Implemented and statically reviewed; tests not run |
 | M2.1 Protocol/schema foundation | IN PROGRESS | #6 | Major schema/protocol pieces implemented; must be locally validated and finished |
 | M2.2 Package/blob storage | CODE COMPLETE | #7 | Storage/transport implemented and locally validated; GC design doc landed (`docs/development/GC_DESIGN.md`), destructive sweep deferred by design |
 | M2.3 Device identity/credentials | CODE COMPLETE | #8 | Server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
 | M2.4 Idempotent push | CODE COMPLETE (desktop) | #9 | Push endpoint validated live; desktop durable ACK transaction, blob negotiation/upload, push client landed |
-| M2.5 Durable pull/change feed | CODE COMPLETE (desktop) | #10 | Page apply + cursor commit + HTTP pull client + verified blob download landed |
+| M2.5 Durable pull/change feed | CODE COMPLETE (desktop) | #10 | Page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration landed 2026-09-07 (`hydrate_skill`, pulled skills now deployable) |
 | M2.6 Desktop sync orchestrator | CODE COMPLETE (core) | #11 | `SyncEngine::run_cycle` + background triggers landed; WebView commands wired |
 | M2.7 Conflict/reliability checkpoint | CODE COMPLETE (core) | #12 | Conflict query/resolution + 4xx classifier landed; server-side and live client-process scenarios validated 2026-09-06 |
 | M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED | roadmap | Signed entitlement leases shipped in pull metadata; desktop schema-v4 store + pull-apply/startup/post-pull reconciliation; live CDP validation 2026-09-07 (see CURRENT_STATUS.md) |
-| M4 Production hardening | PLANNED | roadmap | Observability, updates, fault testing, release SLO |
+| M4 Production hardening | IN PROGRESS | roadmap | Observability + migration safety landed; NSIS installer packaging landed 2026-09-07 (`bundle.active=true`, zh/en); signed updates + SLO gates still design-only |
 
 `CODE COMPLETE` must not be relabeled `VERIFIED` until the local validation checklist has actually been run.
 
@@ -197,7 +205,7 @@ Implemented on `feat/desktop-foundation`:
 - M2 detailed plan added at `docs/architecture/m2-cloud-sync-plan.md`.
 - No routine GitHub Actions workflow remains enabled.
 
-Important: Tauri/Cargo runtime execution has not yet been locally validated.
+Important: Tauri/Cargo runtime execution has since been validated locally (multi-round cargo suites + live desktop E2E, 2026-09-05..08).
 
 ---
 
@@ -293,7 +301,7 @@ The model distinguishes:
 - Skill root path;
 - built-in vs custom profile.
 
-Known built-in discovery currently covers the intended roots for:
+Known built-in discovery currently covers 12 targets (2026-09-07: added Cursor `~/.cursor/skills`, Windsurf `~/.windsurf/skills`, Trae `~/.trae/skills`, ZCode `~/.zcode/skills`; original 7 were Claude Code, Claude Desktop, Codex, Gemini CLI, OpenCode, OpenClaw, Grok Build) plus the unified `~/.agents/skills` directory and user-defined custom profiles.
 
 - Claude Code;
 - Claude Desktop;
@@ -434,7 +442,7 @@ The tests specify that the caller can rollback all domain rows after a mutation 
 
 GitHub issue: #6.
 
-This is the exact point where local development should resume.
+Historical resume point (superseded 2026-09-08 — see CURRENT_STATUS "Exact next task").
 
 ### 8.1 Server ORM models already added
 
@@ -529,7 +537,7 @@ The migration currently performs:
 5. create device/blob/receipt/change-log tables;
 6. create an initial change-feed baseline for existing Skills.
 
-This migration is **handwritten and unexecuted**. Treat migration validation as high priority.
+This migration was handwritten and has since been executed and re-verified (fresh + upgrade paths, 2026-09-06..08). Treat migration validation as high priority.
 
 ### 8.4 Protocol v1 schema already added
 
@@ -1350,7 +1358,11 @@ Keep cloud authorization out of Agent adapters.
 
 # PART D — KNOWN RISKS AND DO-NOT-ASSUME LIST
 
-## 20. Current implementation is not runtime-verified
+## 20.
+
+> Resolved 2026-09-06/08: the sync stack described below has since been
+> runtime-verified live (M2.7 conflict scenarios + 2026-09-08 end-to-end
+> productization run). Text retained as the historical record. Current implementation is not runtime-verified
 
 Do not assume any of the following pass merely because files exist:
 
@@ -1520,7 +1532,7 @@ Do not ignore source migrations, snapshot test fixtures, or intentionally versio
 
 The new local agent should execute this sequence before making broad changes:
 
-1. `git checkout feat/desktop-foundation`
+1. `git checkout feat/desktop-productization`
 2. confirm working tree is clean or identify owner-local uncommitted work;
 3. read `AGENTS.md`;
 4. read this file;

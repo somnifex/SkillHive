@@ -23,6 +23,9 @@ const DashboardPage = lazy(() =>
 const SkillsPage = lazy(() =>
   import("../pages/SkillsPage").then((module) => ({ default: module.SkillsPage })),
 );
+const AgentDeployPage = lazy(() =>
+  import("../pages/AgentDeployPage").then((module) => ({ default: module.AgentDeployPage })),
+);
 const TemplatesPage = lazy(() =>
   import("../pages/TemplatesPage").then((module) => ({ default: module.TemplatesPage })),
 );
@@ -90,6 +93,7 @@ export function AppRouter() {
           >
             <Route index element={<DashboardPage />} />
             <Route path="skills" element={<SkillsPage />} />
+            <Route path="agents" element={<AgentDeployPage />} />
             <Route path="templates" element={<TemplatesPage />} />
             <Route path="groups" element={<GroupsPage />} />
             <Route path="groups/:groupId" element={<GroupDetailPage />} />

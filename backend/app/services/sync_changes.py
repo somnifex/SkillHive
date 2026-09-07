@@ -98,7 +98,7 @@ def list_changes(
 def _oldest_retained_sequence(session: Session) -> int | None:
     """The oldest sequence still in the change log, or None when empty.
 
-    With trimming (the future GC companion) rows older than the retention
+    With trimming (the GC companion, landed in sync_trim.py) rows older than the retention
     window are deleted; a cursor below the oldest surviving row can no
     longer be served contiguously and must fail with SYNC_CURSOR_EXPIRED.
     """

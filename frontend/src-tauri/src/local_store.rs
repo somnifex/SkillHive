@@ -5,6 +5,7 @@ mod entitlements;
 mod migrations;
 mod mutations;
 mod outcomes;
+mod prefs;
 mod pull_apply;
 mod skills;
 mod sync_state;
@@ -170,6 +171,7 @@ pub struct CommitSkillEdit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalSkill {
     pub id: String,
     pub remote_id: Option<String>,
@@ -202,6 +204,7 @@ pub struct LocalMutation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalSyncState {
     pub protocol_version: u32,
     pub client_instance_id: Option<String>,
@@ -224,6 +227,7 @@ pub struct UpsertAgentProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentProfileRecord {
     pub id: String,
     pub descriptor_id: String,
@@ -244,6 +248,7 @@ pub struct RecordDeployment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillDeploymentRecord {
     pub skill_id: String,
     pub agent_profile_id: String,

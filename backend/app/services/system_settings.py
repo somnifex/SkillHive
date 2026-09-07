@@ -21,11 +21,29 @@ from app.services.blob_storage import (
     s3_credentials_present,
 )
 
+DEFAULT_TRASH_RETENTION_DAYS = 30
+
 
 def registration_enabled(session: Session) -> bool:
     row = session.get(SystemSetting, SETTINGS_KEY)
     value = row.value if row is not None and isinstance(row.value, dict) else {}
     return bool(value.get("allow_registration", True))
+
+
+def trash_retention_days(session: Session) -> int:
+    """Days a soft-deleted skill survives in the trash before auto-purge.
+
+    ``0`` disables automatic purging: the trash only shrinks when a user or
+    admin purges entries explicitly. The value must not depend on caches, so
+    it is read from the relational row on every call.
+    """
+    row = session.get(SystemSetting, SETTINGS_KEY)
+    value = row.value if row is not None and isinstance(row.value, dict) else {}
+    raw = value.get("trash_retention_days", DEFAULT_TRASH_RETENTION_DAYS)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_TRASH_RETENTION_DAYS
 
 
 class SystemSettingsService:
@@ -45,6 +63,7 @@ class SystemSettingsService:
             s3_credentials_configured=s3_credentials_present(),
             allow_registration=bool(value.get("allow_registration", True)),
             max_package_bytes=value.get("max_package_bytes"),
+            trash_retention_days=trash_retention_days(self.session),
         )
 
     def update(self, data: SystemSettingsUpdate) -> SystemSettingsRead:

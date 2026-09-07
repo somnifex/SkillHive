@@ -676,6 +676,45 @@ img {
   color: var(--muted-2);
 }
 
+/* ---------- Agent 部署 ---------- */
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.agent-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  background: var(--surface);
+}
+
+.agent-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.agent-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-root {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.sync-chip-label {
+  margin-left: 4px;
+  font-size: 12px;
+}
+
 /* ---------- 通用表面 ---------- */
 
 .toolbar,

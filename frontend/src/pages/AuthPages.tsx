@@ -13,7 +13,8 @@ import { useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 
 import { api, currentServerUrl, errorMessage, setServerUrl } from "../api/client";
-import { isDesktop, normalizeServerUrl, pingServer } from "../api/server";
+import { isDesktop, normalizeServerUrl, pingServer, resolveServerOrigin } from "../api/server";
+import { desktopLogin, syncNow } from "../api/desktop";
 import { BrandLogo } from "../components/BrandLogo";
 import { useAuthStore } from "../stores/auth";
 import type { TokenResponse, User } from "../types";
@@ -140,6 +141,22 @@ export function LoginPage() {
     try {
       const { data } = await api.post<TokenResponse>("/auth/login", values);
       setSession(data);
+      if (isDesktop()) {
+        // The web session authorizes pages; the device registration below
+        // is what activates offline sync, hydration and agent deployment.
+        try {
+          await desktopLogin({
+            username: values.username,
+            password: values.password,
+            baseUrl: resolveServerOrigin() || "http://127.0.0.1:8000",
+          });
+          await syncNow().catch(() => undefined);
+        } catch (error) {
+          message.warning(
+            `本地同步设备注册失败：${error instanceof Error ? error.message : "未知错误"}`,
+          );
+        }
+      }
       message.success("登录成功");
       navigate("/");
     } catch (error) {

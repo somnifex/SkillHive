@@ -30,6 +30,8 @@ export interface SkillVersion {
   id: string;
   skill_id: string;
   version: string;
+  revision?: number;
+  tags?: string[];
   content: {
     system_prompt?: string;
     instructions?: string;
@@ -60,6 +62,7 @@ export interface Skill {
   current_version: SkillVersion | null;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
 }
 
 export interface SkillTemplate {
@@ -142,4 +145,5 @@ export interface SystemSettings {
   s3_credentials_configured: boolean;
   allow_registration: boolean;
   max_package_bytes: number | null;
+  trash_retention_days: number;
 }

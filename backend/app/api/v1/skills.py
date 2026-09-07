@@ -12,6 +12,8 @@ from app.schemas.skill import (
     SkillUpdate,
     SkillVersionCreate,
     SkillVersionRead,
+    VersionRollbackRequest,
+    VersionTagsUpdate,
 )
 from app.services.skills import PrivateSkillService
 
@@ -52,6 +54,29 @@ def create_skill(
     return PrivateSkillService(session, user).create(data)
 
 
+# Static paths must be declared before the /{skill_id} routes so FastAPI does
+# not swallow them as a skill id.
+@router.get("/categories", response_model=list[str])
+def list_categories(
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> list[str]:
+    return PrivateSkillService(session, user).categories()
+
+
+@router.get("/trash", response_model=Page[SkillRead])
+def list_trash(
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+    query: Annotated[str | None, Query(max_length=120)] = None,
+) -> Page[SkillRead]:
+    return PrivateSkillService(session, user).trash_page(
+        page=page, page_size=page_size, query=query
+    )
+
+
 @router.get("/{skill_id}", response_model=SkillRead)
 def get_skill(
     skill_id: str,
@@ -81,6 +106,26 @@ def delete_skill(
     return Response(status_code=204)
 
 
+@router.post("/{skill_id}/restore", response_model=SkillRead)
+def restore_skill(
+    skill_id: str,
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> SkillRead:
+    return PrivateSkillService(session, user).restore(skill_id)
+
+
+@router.delete("/{skill_id}/purge", status_code=204)
+def purge_skill(
+    skill_id: str,
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> Response:
+    """Permanently deletes a trashed skill (irreversible)."""
+    PrivateSkillService(session, user).purge(skill_id)
+    return Response(status_code=204)
+
+
 @router.post("/{skill_id}/copy", response_model=SkillRead, status_code=201)
 def copy_skill(
     skill_id: str,
@@ -107,3 +152,47 @@ def create_version(
     session: Annotated[Session, Depends(get_db)],
 ) -> SkillVersionRead:
     return PrivateSkillService(session, user).create_version(skill_id, data)
+
+
+@router.put("/{skill_id}/versions/{version}/tags", response_model=SkillVersionRead)
+def set_version_tags(
+    skill_id: str,
+    version: str,
+    data: VersionTagsUpdate,
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> SkillVersionRead:
+    return PrivateSkillService(session, user).set_version_tags(skill_id, version, data.tags)
+
+
+@router.post("/{skill_id}/rollback", response_model=SkillVersionRead, status_code=201)
+def rollback_version(
+    skill_id: str,
+    data: VersionRollbackRequest,
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> SkillVersionRead:
+    """Mints a new draft version carrying an older version's content."""
+    return PrivateSkillService(session, user).rollback(skill_id, data)
+
+
+@router.get("/{skill_id}/versions/{version}/export")
+def export_version(
+    skill_id: str,
+    version: str,
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> Response:
+    """Downloads one version as a portable zip package.
+
+    Real packages are rebuilt from the content-addressed blob storage; legacy
+    (browser-authored) versions synthesize their minimal SKILL.md package on
+    the fly, mirroring the sync pull behavior.
+    """
+    payload = PrivateSkillService(session, user).export_version_zip(skill_id, version)
+    filename = f"{version.replace('.', '_')}.zip"
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

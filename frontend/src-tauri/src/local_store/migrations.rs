@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::LocalStoreError;
 use std::path::Path;
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 4;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 5;
 
 pub(super) const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -209,6 +209,16 @@ pub(super) const MIGRATIONS: &[(i64, &str)] = &[
 
         CREATE INDEX idx_local_entitlements_expires
             ON local_entitlements(expires_at);
+        "#,
+    ),
+    (
+        5,
+        r#"
+        CREATE TABLE deployment_prefs (
+            skill_id TEXT PRIMARY KEY NOT NULL CHECK (length(skill_id) <= 64),
+            profile_ids TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         "#,
     ),
 ];

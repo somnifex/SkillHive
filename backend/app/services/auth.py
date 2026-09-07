@@ -11,6 +11,7 @@ from app.models import TokenSession, User
 from app.repositories.users import UserRepository
 from app.schemas.auth import RegisterRequest
 from app.services.audit import write_audit
+from app.services.system_settings import registration_enabled
 from app.services.templates import ensure_default_template
 
 
@@ -20,6 +21,12 @@ class AuthService:
         self.users = UserRepository(session)
 
     def register(self, data: RegisterRequest) -> User:
+        if not registration_enabled(self.session):
+            raise AppError(
+                "REGISTRATION_DISABLED",
+                "Self-registration is disabled on this server.",
+                403,
+            )
         username = data.username.strip().lower()
         email = str(data.email).lower()
         if self.users.username_exists(username):

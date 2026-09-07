@@ -55,7 +55,7 @@ class SkillMutationService:
         if package_manifest_hash is not None:
             return package_manifest_hash
         if self._storage is None:
-            self._storage = get_blob_storage()
+            self._storage = get_blob_storage(self.session)
         return synthesize_legacy_package(
             self.session,
             self._storage,

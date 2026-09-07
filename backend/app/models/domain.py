@@ -45,6 +45,21 @@ class TokenSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     user: Mapped[User] = relationship()
 
 
+class SystemSetting(TimestampMixin, Base):
+    """Admin-editable platform configuration (key/value JSON).
+
+    Secrets never live here: S3 credentials stay in server environment
+    variables and are only *referenced* by settings (see
+    docs/architecture/group-tree-and-admin-console.md §4).
+    """
+
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+
+
 class Group(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "groups"
     __table_args__ = (

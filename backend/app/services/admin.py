@@ -1,15 +1,18 @@
 from datetime import datetime
 from math import ceil
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
+from app.core.security import hash_password
 from app.db.base import utc_now
-from app.models import AuditLog, Group, GroupMember, User
+from app.models import AuditLog, Group, GroupMember, Skill, TokenSession, User
+from app.repositories.users import UserRepository
 from app.schemas.audit import AuditLogRead
 from app.schemas.common import Page
 from app.schemas.group import GroupRead, MemberRead
+from app.schemas.system_settings import AdminUserCreate
 from app.schemas.user import UserRead, UserSummary
 from app.services.audit import write_audit
 
@@ -72,6 +75,96 @@ class AdminService:
         )
         self.session.commit()
         return UserRead.model_validate(user)
+
+    def create_user(self, data: AdminUserCreate) -> UserRead:
+        users = UserRepository(self.session)
+        username = data.username.strip().lower()
+        email = str(data.email).lower()
+        if users.username_exists(username):
+            raise AppError("USERNAME_TAKEN", "Username is already in use.", 409)
+        if users.email_exists(email):
+            raise AppError("EMAIL_TAKEN", "Email is already in use.", 409)
+        user = User(
+            username=username,
+            display_name=data.display_name.strip(),
+            email=email,
+            password_hash=hash_password(data.password),
+            status="active",
+            is_global_admin=data.is_global_admin,
+        )
+        self.session.add(user)
+        self.session.flush()
+        write_audit(
+            self.session,
+            actor_user_id=self.admin.id,
+            action="user.created_by_admin",
+            resource_type="user",
+            resource_id=user.id,
+            after_data={"username": user.username, "email": user.email},
+        )
+        self.session.commit()
+        return UserRead.model_validate(user)
+
+    def reset_password(self, user_id: str, new_password: str) -> None:
+        user = self.session.get(User, user_id)
+        if user is None or user.status == "deleted":
+            raise AppError("USER_NOT_FOUND", "User was not found.", 404)
+        user.password_hash = hash_password(new_password)
+        self.session.execute(
+            update(TokenSession)
+            .where(TokenSession.user_id == user.id, TokenSession.revoked_at.is_(None))
+            .values(revoked_at=utc_now())
+        )
+        write_audit(
+            self.session,
+            actor_user_id=self.admin.id,
+            action="user.password_reset_by_admin",
+            resource_type="user",
+            resource_id=user.id,
+        )
+        self.session.commit()
+
+    def delete_user(self, user_id: str) -> None:
+        user = self.session.get(User, user_id)
+        if user is None or user.status == "deleted":
+            raise AppError("USER_NOT_FOUND", "User was not found.", 404)
+        if user.id == self.admin.id:
+            raise AppError("SELF_DELETE_FORBIDDEN", "You cannot delete your own account.", 409)
+        owns_group = self.session.scalar(
+            select(func.count())
+            .select_from(Group)
+            .where(Group.owner_id == user.id, Group.status == "active")
+        )
+        owns_skills = self.session.scalar(
+            select(func.count())
+            .select_from(Skill)
+            .where(
+                Skill.owner_user_id == user_id,
+                Skill.deleted_at.is_(None),
+            )
+        )
+        if (owns_group or 0) > 0 or (owns_skills or 0) > 0:
+            raise AppError(
+                "USER_OWNS_RESOURCES",
+                "Transfer group/skill ownership before deleting this user.",
+                409,
+            )
+        user.status = "deleted"
+        user.deleted_at = utc_now()
+        self.session.execute(
+            update(TokenSession)
+            .where(TokenSession.user_id == user.id, TokenSession.revoked_at.is_(None))
+            .values(revoked_at=utc_now())
+        )
+        write_audit(
+            self.session,
+            actor_user_id=self.admin.id,
+            action="user.deleted_by_admin",
+            resource_type="user",
+            resource_id=user.id,
+            before_data={"username": user.username},
+        )
+        self.session.commit()
 
     def groups(
         self,

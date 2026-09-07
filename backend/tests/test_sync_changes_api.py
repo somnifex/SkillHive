@@ -59,9 +59,15 @@ def pull_client(
 
     # Legacy synthesis writes real blobs from both the REST mutation path and
     # the lazy pull projection; point both call sites at the tmp storage.
-    monkeypatch.setattr("app.api.v1.sync.get_blob_storage", lambda: pull_storage)
-    monkeypatch.setattr("app.services.skill_mutations.get_blob_storage", lambda: pull_storage)
-    monkeypatch.setattr("app.services.sync_changes.get_blob_storage", lambda: pull_storage)
+    monkeypatch.setattr("app.api.v1.sync.get_blob_storage", lambda _session=None: pull_storage)
+    monkeypatch.setattr(
+        "app.services.skill_mutations.get_blob_storage",
+        lambda _session=None: pull_storage,
+    )
+    monkeypatch.setattr(
+        "app.services.sync_changes.get_blob_storage",
+        lambda _session=None: pull_storage,
+    )
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
         yield test_client

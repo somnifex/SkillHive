@@ -51,7 +51,7 @@ def push_client(
     def override_get_db() -> Generator[Session, None, None]:
         yield push_session
 
-    monkeypatch.setattr("app.api.v1.sync.get_blob_storage", lambda: push_storage)
+    monkeypatch.setattr("app.api.v1.sync.get_blob_storage", lambda _session=None: push_storage)
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
         yield test_client

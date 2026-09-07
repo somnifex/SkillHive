@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     database_url: str = "sqlite:///./data/skillhive.db"
     blob_storage_path: str = "./data/blobs"
+    # Storage backend selection (system admin console / design doc §4). The
+    # DB-stored system setting overrides this default; credentials always stay
+    # in environment variables and are never persisted to the database.
+    blob_storage_backend: str = "local"
+    s3_endpoint_url: str | None = None
+    s3_bucket: str | None = None
+    s3_prefix: str = ""
+    s3_region: str | None = None
     jwt_secret_key: str = Field(
         default="development-only-change-me-at-least-32-bytes",
         min_length=16,

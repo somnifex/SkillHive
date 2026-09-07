@@ -42,7 +42,7 @@ def negotiate_missing_blobs(
     """Report which of the declared objects the server still needs."""
     del user  # Object ownership is enforced at mutation commit, not at blob
     # presence checks; any authenticated user may negotiate.
-    storage = get_blob_storage()
+    storage = get_blob_storage(session)
     missing = missing_blobs(session, storage, request.objects)
     return MissingBlobsResponse(missing=missing)
 
@@ -60,7 +60,7 @@ async def upload_blob(
     oversized body is rejected before the object becomes addressable.
     """
     del user
-    storage = get_blob_storage()
+    storage = get_blob_storage(session)
 
     declared_size: int | None = None
     if content_length := request.headers.get("content-length"):
@@ -102,14 +102,14 @@ async def upload_blob(
 def download_blob(
     hash_value: str,
     user: CurrentUser,
+    session: DBSession,
 ) -> StreamingResponse:
     """Stream a verified stored object back to the client."""
     del user  # Package ownership is enforced at mutation level; blob bytes
     # are content-addressed and carry no authorization boundary of their own.
-    storage = get_blob_storage()
+    storage = get_blob_storage(session)
     stream = storage.open(hash_value)
     return StreamingResponse(stream, media_type="application/octet-stream")
-
 
 @router.post("/mutations", response_model=SyncMutationResponse)
 def submit_mutation(
@@ -131,7 +131,7 @@ def submit_mutation(
         user_id=user.id,
         device=device,
         request=request,
-        storage=get_blob_storage(),
+        storage=get_blob_storage(session),
     )
     session.commit()
     return SyncMutationResponse.model_validate(payload)

@@ -18,9 +18,17 @@ from app.schemas.skill import (
     SkillVersionCreate,
     SkillVersionRead,
 )
+from app.schemas.system_settings import (
+    AdminPasswordReset,
+    AdminUserCreate,
+    SystemSettingsRead,
+    SystemSettingsUpdate,
+)
 from app.schemas.user import UserRead, UserStatusUpdate
 from app.services.admin import AdminService
 from app.services.global_skills import GlobalSkillService
+from app.services.groups import GroupService
+from app.services.system_settings import SystemSettingsService
 
 router = APIRouter(prefix="/admin", tags=["administration"])
 
@@ -50,6 +58,61 @@ def update_user_status(
     session: Annotated[Session, Depends(get_db)],
 ) -> UserRead:
     return AdminService(session, admin).set_user_status(user_id, data.status)
+
+
+@router.post("/users", response_model=UserRead, status_code=201)
+def admin_create_user(
+    data: AdminUserCreate,
+    admin: GlobalAdmin,
+    session: Annotated[Session, Depends(get_db)],
+) -> UserRead:
+    return AdminService(session, admin).create_user(data)
+
+
+@router.post("/users/{user_id}/reset-password", status_code=204)
+def admin_reset_password(
+    user_id: str,
+    data: AdminPasswordReset,
+    admin: GlobalAdmin,
+    session: Annotated[Session, Depends(get_db)],
+) -> Response:
+    AdminService(session, admin).reset_password(user_id, data.new_password)
+    return Response(status_code=204)
+
+
+@router.delete("/users/{user_id}", status_code=204)
+def admin_delete_user(
+    user_id: str,
+    admin: GlobalAdmin,
+    session: Annotated[Session, Depends(get_db)],
+) -> Response:
+    AdminService(session, admin).delete_user(user_id)
+    return Response(status_code=204)
+
+
+@router.get("/groups/tree", response_model=list[GroupRead])
+def admin_group_tree(
+    admin: GlobalAdmin,
+    session: Annotated[Session, Depends(get_db)],
+) -> list[GroupRead]:
+    return GroupService(session, admin).tree()
+
+
+@router.get("/system/settings", response_model=SystemSettingsRead)
+def get_system_settings(
+    admin: GlobalAdmin,
+    session: Annotated[Session, Depends(get_db)],
+) -> SystemSettingsRead:
+    return SystemSettingsService(session, admin).read()
+
+
+@router.patch("/system/settings", response_model=SystemSettingsRead)
+def update_system_settings(
+    data: SystemSettingsUpdate,
+    admin: GlobalAdmin,
+    session: Annotated[Session, Depends(get_db)],
+) -> SystemSettingsRead:
+    return SystemSettingsService(session, admin).update(data)
 
 
 @router.get("/groups", response_model=Page[GroupRead])

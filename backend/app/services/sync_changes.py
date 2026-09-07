@@ -163,7 +163,7 @@ def _ensure_legacy_package(session: Session, skill: Skill) -> None:
         return
     manifest_hash = synthesize_legacy_package(
         session,
-        get_blob_storage(),
+        get_blob_storage(session),
         slug=skill.slug,
         name=skill.name,
         description=skill.description,

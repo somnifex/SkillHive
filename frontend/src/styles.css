@@ -1008,6 +1008,10 @@ img {
   padding: 0 0 18px;
 }
 
+.group-breadcrumb {
+  margin: 4px 0 12px;
+}
+
 .toolbar > span {
   display: inline-flex;
   min-height: 44px;

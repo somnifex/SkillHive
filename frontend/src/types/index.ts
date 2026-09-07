@@ -89,6 +89,9 @@ export interface Group {
   description: string;
   group_type: string;
   owner_id: string;
+  parent_id: string | null;
+  parent_name: string | null;
+  ancestors: { id: string; name: string }[];
   join_policy: string;
   allow_member_invite: boolean;
   status: string;

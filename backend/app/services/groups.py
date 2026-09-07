@@ -11,6 +11,7 @@ from app.repositories.groups import GroupRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import Page
 from app.schemas.group import (
+    GroupAncestor,
     GroupCreate,
     GroupRead,
     GroupUpdate,
@@ -125,7 +126,9 @@ class GroupService:
 
     def get(self, group_id: str) -> GroupRead:
         group, role = self._member_context(group_id)
-        return self._read(group, role)
+        result = self._read(group, role)
+        result.ancestors = self._ancestor_chain(group)
+        return result
 
     def update(self, group_id: str, data: GroupUpdate) -> GroupRead:
         group, role = self._manager_context(group_id)
@@ -512,6 +515,14 @@ class GroupService:
 
     def _read(self, group: Group, role: str) -> GroupRead:
         return self._read_many([group], {group.id: role})[0]
+
+    def _ancestor_chain(self, group: Group) -> list[GroupAncestor]:
+        chain: list[GroupAncestor] = []
+        node = group.parent
+        while node is not None and len(chain) < MAX_GROUP_DEPTH:
+            chain.append(GroupAncestor(id=node.id, name=node.name))
+            node = node.parent
+        return chain
 
     def _member_read(self, membership: GroupMember) -> MemberRead:
         result = MemberRead.model_validate(membership)

@@ -2,6 +2,7 @@ import { ArrowLeft, Blocks, Plus, Settings, Trash2, UserPlus } from "lucide-reac
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   App,
+  Breadcrumb,
   Button,
   Descriptions,
   Empty,
@@ -33,9 +34,11 @@ export function GroupDetailPage() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [subgroupOpen, setSubgroupOpen] = useState(false);
   const [form] = Form.useForm();
   const [settingsForm] = Form.useForm();
   const [enableForm] = Form.useForm();
+  const [subgroupForm] = Form.useForm<{ name: string; description: string }>();
   const selectedSkillId = Form.useWatch("skill_id", enableForm) as string | undefined;
   const versionPolicy = Form.useWatch("version_policy", enableForm) as string | undefined;
 
@@ -160,6 +163,20 @@ export function GroupDetailPage() {
       message.error(errorMessage(error));
     }
   };
+  const createSubgroup = useMutation({
+    mutationFn: (values: { name: string; description: string }) =>
+      api.post<Group>("/groups", { ...values, parent_group_id: groupId }),
+    onSuccess: ({ data }) => {
+      message.success("子群组已创建");
+      setSubgroupOpen(false);
+      subgroupForm.resetFields();
+      queryClient.invalidateQueries({ queryKey: ["groups-tree"] });
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
+      queryClient.invalidateQueries({ queryKey: ["group", groupId] });
+      navigate(`/groups/${data.id}`);
+    },
+    onError: (error) => message.error(errorMessage(error)),
+  });
 
   return (
     <>
@@ -170,11 +187,32 @@ export function GroupDetailPage() {
       >
         返回群组
       </Button>
+      {(group.data?.ancestors.length ?? 0) > 0 && (
+        <Breadcrumb
+          className="group-breadcrumb"
+          items={[
+            ...group.data!.ancestors.map((ancestor) => ({
+              title: (
+                <a onClick={() => navigate(`/groups/${ancestor.id}`)}>{ancestor.name}</a>
+              ),
+            })),
+            { title: group.data?.name },
+          ]}
+        />
+      )}
       <PageHeader
         title={group.data?.name ?? "群组详情"}
         description={group.data?.description || "暂无描述"}
         actions={
           <>
+            {isManager && (
+              <Button
+                icon={<Plus size={17} aria-hidden="true" />}
+                onClick={() => setSubgroupOpen(true)}
+              >
+                新建子群组
+              </Button>
+            )}
             {isManager && (
               <Button
                 icon={<Settings size={17} aria-hidden="true" />}
@@ -202,7 +240,22 @@ export function GroupDetailPage() {
             children: (
               <Descriptions bordered column={2}>
                 <Descriptions.Item label="我的角色">
-                  <Tag>{group.data?.current_user_role}</Tag>
+                  <Tag color={group.data?.current_user_role === "owner" ? "gold" : group.data?.current_user_role === "admin" ? "blue" : "default"}>
+                    {group.data?.current_user_role === "owner"
+                      ? "群主"
+                      : group.data?.current_user_role === "admin"
+                        ? "管理员"
+                        : "成员"}
+                  </Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="上级群组">
+                  {group.data?.parent_id ? (
+                    <a onClick={() => navigate(`/groups/${group.data?.parent_id}`)}>
+                      {group.data?.parent_name}
+                    </a>
+                  ) : (
+                    "顶层群组"
+                  )}
                 </Descriptions.Item>
                 <Descriptions.Item label="群组类型">{group.data?.group_type}</Descriptions.Item>
                 <Descriptions.Item label="加入策略">{group.data?.join_policy}</Descriptions.Item>
@@ -439,6 +492,27 @@ export function GroupDetailPage() {
               />
             </Form.Item>
           )}
+        </Form>
+      </Modal>
+      <Modal
+        open={subgroupOpen}
+        title={`在「${group.data?.name ?? ""}」下新建子群组`}
+        okText="创建"
+        confirmLoading={createSubgroup.isPending}
+        onCancel={() => setSubgroupOpen(false)}
+        onOk={() => subgroupForm.submit()}
+      >
+        <Form
+          form={subgroupForm}
+          layout="vertical"
+          onFinish={(values) => createSubgroup.mutate(values)}
+        >
+          <Form.Item name="name" label="子群组名称" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="description" label="描述">
+            <Input.TextArea rows={3} />
+          </Form.Item>
         </Form>
       </Modal>
       {currentUser?.id === group.data?.owner_id && members.data && (

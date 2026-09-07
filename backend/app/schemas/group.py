@@ -27,6 +27,11 @@ class GroupUpdate(BaseModel):
     allow_member_invite: bool | None = None
 
 
+class GroupAncestor(BaseModel):
+    id: str
+    name: str
+
+
 class GroupRead(ORMModel):
     id: str
     name: str
@@ -36,6 +41,9 @@ class GroupRead(ORMModel):
     owner_id: str
     parent_id: str | None = None
     parent_name: str | None = None
+    # Populated on the detail endpoint; list/tree responses keep it empty and
+    # let the client derive hierarchy from parent_id/parent_name.
+    ancestors: list[GroupAncestor] = []
     join_policy: str
     allow_member_invite: bool
     status: str

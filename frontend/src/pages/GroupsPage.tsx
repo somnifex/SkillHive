@@ -13,18 +13,58 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api, errorMessage } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
-import type { Group, Page } from "../types";
+import type { Group } from "../types";
 
 interface GroupForm {
   name: string;
   description: string;
+  parent_group_id?: string;
   join_policy: string;
   allow_member_invite: boolean;
+}
+
+interface GroupRow extends Group {
+  children?: GroupRow[];
+}
+
+const ROLE_TAGS: Record<string, { label: string; color: string }> = {
+  owner: { label: "群主", color: "gold" },
+  admin: { label: "管理员", color: "blue" },
+  member: { label: "成员", color: "default" },
+};
+
+function buildRows(groups: Group[]): GroupRow[] {
+  const byId = new Map<string, GroupRow>();
+  for (const group of groups) {
+    byId.set(group.id, { ...group });
+  }
+  const roots: GroupRow[] = [];
+  for (const row of byId.values()) {
+    const parent = row.parent_id ? byId.get(row.parent_id) : undefined;
+    if (parent && parent !== row) {
+      parent.children = parent.children ?? [];
+      parent.children.push(row);
+    } else {
+      roots.push(row);
+    }
+  }
+  return roots;
+}
+
+function filterManaged(rows: GroupRow[]): GroupRow[] {
+  const kept: GroupRow[] = [];
+  for (const row of rows) {
+    const children = filterManaged(row.children ?? []);
+    const selfManaged = row.current_user_role === "owner" || row.current_user_role === "admin";
+    if (!selfManaged && children.length === 0) continue;
+    kept.push(children.length > 0 ? { ...row, children } : { ...row, children: undefined });
+  }
+  return kept;
 }
 
 export function GroupsPage() {
@@ -34,19 +74,25 @@ export function GroupsPage() {
   const [open, setOpen] = useState(false);
   const [managedOnly, setManagedOnly] = useState(false);
   const [form] = Form.useForm<GroupForm>();
-  const groups = useQuery({
-    queryKey: ["groups", managedOnly],
-    queryFn: () =>
-      api
-        .get<Page<Group>>("/groups", { params: { managed_only: managedOnly } })
-        .then((r) => r.data),
+  const tree = useQuery({
+    queryKey: ["groups-tree"],
+    queryFn: () => api.get<Group[]>("/groups/tree").then((r) => r.data),
   });
+  const rows = useMemo(() => {
+    const roots = buildRows(tree.data ?? []);
+    return managedOnly ? filterManaged(roots) : roots;
+  }, [tree.data, managedOnly]);
+  const manageables = useMemo(
+    () => (tree.data ?? []).filter((g) => g.current_user_role === "owner" || g.current_user_role === "admin"),
+    [tree.data],
+  );
   const create = useMutation({
     mutationFn: (values: GroupForm) => api.post<Group>("/groups", values),
     onSuccess: ({ data }) => {
       message.success("群组已创建");
       setOpen(false);
       form.resetFields();
+      queryClient.invalidateQueries({ queryKey: ["groups-tree"] });
       queryClient.invalidateQueries({ queryKey: ["groups"] });
       navigate(`/groups/${data.id}`);
     },
@@ -57,7 +103,7 @@ export function GroupsPage() {
     <>
       <PageHeader
         title="我的群组"
-        description="管理你加入和负责的协作空间。"
+        description="管理你加入和负责的协作空间，支持树状子群组。"
         actions={
           <Button
             type="primary"
@@ -75,8 +121,8 @@ export function GroupsPage() {
       </div>
       <Table
         rowKey="id"
-        loading={groups.isLoading}
-        dataSource={groups.data?.items}
+        loading={tree.isLoading}
+        dataSource={rows}
         locale={{
           emptyText: (
             <Empty
@@ -89,10 +135,11 @@ export function GroupsPage() {
           onClick: () => navigate(`/groups/${record.id}`),
           className: "clickable-row",
         })}
+        expandable={{ indentSize: 28 }}
         columns={[
           {
             title: "群组",
-            render: (_: unknown, record: Group) => (
+            render: (_: unknown, record: GroupRow) => (
               <div className="group-name">
                 <div className="group-icon">
                   <Users size={19} strokeWidth={1.6} aria-hidden="true" />
@@ -109,11 +156,15 @@ export function GroupsPage() {
           {
             title: "我的角色",
             dataIndex: "current_user_role",
-            render: (role: string) => (
-              <Tag color={role === "owner" ? "gold" : role === "admin" ? "blue" : "default"}>
-                {role}
-              </Tag>
-            ),
+            render: (role: string) => {
+              const tag = ROLE_TAGS[role];
+              return tag ? <Tag color={tag.color}>{tag.label}</Tag> : <Tag>{role}</Tag>;
+            },
+          },
+          {
+            title: "上级群组",
+            dataIndex: "parent_name",
+            render: (parentName: string | null) => parentName ?? "—",
           },
           { title: "加入策略", dataIndex: "join_policy" },
           { title: "状态", dataIndex: "status" },
@@ -131,13 +182,27 @@ export function GroupsPage() {
           form={form}
           layout="vertical"
           initialValues={{ join_policy: "invite_only", allow_member_invite: false }}
-          onFinish={(values) => create.mutate(values)}
+          onFinish={(values) =>
+            create.mutate({ ...values, parent_group_id: values.parent_group_id || undefined })
+          }
         >
           <Form.Item name="name" label="群组名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
           <Form.Item name="description" label="描述">
             <Input.TextArea rows={3} />
+          </Form.Item>
+          <Form.Item name="parent_group_id" label="上级群组（可选，留空为顶层）">
+            <Select
+              allowClear
+              placeholder="选择上级群组"
+              showSearch
+              optionFilterProp="label"
+              options={manageables.map((g) => ({
+                value: g.id,
+                label: g.parent_name ? `${g.parent_name} / ${g.name}` : g.name,
+              }))}
+            />
           </Form.Item>
           <Form.Item name="join_policy" label="加入策略">
             <Select

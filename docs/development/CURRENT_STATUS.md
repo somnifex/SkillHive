@@ -183,6 +183,15 @@ built `skillhive-desktop.exe`, driven through the GUI:
   expiry drops the web session while keyring credentials persist) — user
   re-logs in; recording as known issue.
 
+### Merged into main (2026-09-08, local)
+
+`feat/desktop-productization` (12 commits + docs follow-up) merged into
+`main` via merge commit `c4f8078` (owner-requested; the other local feature
+branches `feat/group-tree-admin` and `feat/wanhua-ui-revamp` were already
+fully merged). Content is identical to the branch tip that passed the full
+gate set and the 2026-09-07/08 live E2E run. `origin` remains unreachable
+(SSH) — push `main` when access is restored.
+
 ## Current milestone state
 
 | Milestone | Current state |
@@ -203,11 +212,10 @@ built `skillhive-desktop.exe`, driven through the GUI:
 
 ## Exact next task
 
-1. **Merge/PR decision for `feat/desktop-productization`** (ahead of local
-   `main` by 12 commits, live-validated 2026-09-07/08 — see the
-   productization + live-validation sections above). Rebase on `main`,
-   open the PR when `origin` is reachable, merge after the checklist §42
-   scenarios that need a second machine are re-run.
+1. **DONE (2026-09-08)**: `feat/desktop-productization` merged into local
+   `main` (`c4f8078`); feature branches `feat/group-tree-admin` and
+   `feat/wanhua-ui-revamp` verified fully merged and kept. Remaining: push
+   `main` to `origin` when SSH access is restored.
 2. **Wire GC/trim into production scheduling** — `run_blob_gc`
    (destructive mark-and-sweep) and `trim_expired_rows` are implemented with
    unit tests (`a4f28c3`) and the `SYNC_CURSOR_EXPIRED` contract is live in

@@ -23,7 +23,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { useAuthStore } from "../stores/auth";
-import type { Grant, Group, Member, Skill, SkillVersion } from "../types";
+import type { Grant, Group, Member, Page, Skill, SkillVersion } from "../types";
 
 const joinPolicyLabels: Record<string, string> = {
   invite_only: "仅邀请",
@@ -66,6 +66,15 @@ export function GroupDetailPage() {
     queryKey: ["group-grants", groupId],
     queryFn: () =>
       api.get<Grant[]>(`/groups/${groupId}/skills`).then((r) => r.data),
+  });
+  const sharedSkills = useQuery({
+    queryKey: ["group-shared-skills", groupId],
+    queryFn: () =>
+      api
+        .get<Page<Skill>>(`/groups/${groupId}/skills/shared`, {
+          params: { page_size: 1 },
+        })
+        .then((r) => r.data),
   });
   const isManager = ["owner", "admin"].includes(group.data?.current_user_role ?? "");
   const catalog = useQuery({
@@ -354,11 +363,14 @@ export function GroupDetailPage() {
           },
           {
             key: "skills",
-            label: `群组 Skills ${grants.data?.length ?? 0}`,
+            label: `群组 Skills ${(grants.data?.length ?? 0) + (sharedSkills.data?.total ?? 0)}`,
             children: (
               <>
-                {isManager && (
-                  <div className="tab-actions">
+                <div className="tab-actions">
+                  <Button onClick={() => navigate(`/group-skills?group=${groupId}`)}>
+                    管理群组共享 Skill
+                  </Button>
+                  {isManager && (
                     <Button
                       type="primary"
                       icon={<Plus size={16} aria-hidden="true" />}
@@ -366,8 +378,8 @@ export function GroupDetailPage() {
                     >
                       启用全局 Skill
                     </Button>
-                  </div>
-                )}
+                  )}
+                </div>
                 {grants.data?.length ? (
                   <Table
                     rowKey="id"

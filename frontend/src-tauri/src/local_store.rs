@@ -257,6 +257,7 @@ pub struct RecordDeployment {
 #[serde(rename_all = "camelCase")]
 pub struct SkillDeploymentRecord {
     pub skill_id: String,
+    pub skill_name: String,
     pub agent_profile_id: String,
     pub deployed_blob_hash: String,
     pub target_path: PathBuf,

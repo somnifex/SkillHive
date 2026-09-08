@@ -8,6 +8,7 @@ import {
   Plus,
   Rocket,
   Search,
+  Share2,
   Tag as TagIcon,
   Undo2,
   Trash2,
@@ -50,7 +51,7 @@ import {
 } from "../api/desktop";
 import { PageHeader } from "../components/PageHeader";
 import { TrashTab } from "../components/TrashTab";
-import type { Page, Skill, SkillVersion } from "../types";
+import type { Group, Page, Skill, SkillVersion } from "../types";
 
 interface SkillFormValues {
   name: string;
@@ -101,6 +102,8 @@ export function SkillsPage() {
   const [detail, setDetail] = useState<Skill | null>(null);
   const [zipOpen, setZipOpen] = useState(false);
   const [deploying, setDeploying] = useState<Skill | null>(null);
+  const [sharing, setSharing] = useState<Skill | null>(null);
+  const [shareGroupId, setShareGroupId] = useState<string>();
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
   const [tab, setTab] = useState("skills");
   const [form] = Form.useForm<SkillFormValues>();
@@ -132,6 +135,26 @@ export function SkillsPage() {
   const categories = useQuery({
     queryKey: ["skill-categories"],
     queryFn: () => api.get<string[]>("/skills/categories").then((r) => r.data),
+  });
+  const shareGroups = useQuery({
+    queryKey: ["groups", "skill-share"],
+    queryFn: () => api.get<Group[]>("/groups/tree").then((r) => r.data),
+    enabled: Boolean(sharing),
+  });
+  const publishToGroup = useMutation({
+    mutationFn: () => {
+      if (!sharing || !shareGroupId) throw new Error("请选择目标群组");
+      return api.post<Skill>(`/skills/${sharing.id}/publish-to-group`, {
+        group_id: shareGroupId,
+      });
+    },
+    onSuccess: () => {
+      message.success("已发布为群组共享 Skill，个人 Skill 保持不变");
+      setSharing(null);
+      setShareGroupId(undefined);
+      queryClient.invalidateQueries({ queryKey: ["group-shared-skills"] });
+    },
+    onError: (error) => message.error(errorMessage(error)),
   });
 
   useEffect(() => {
@@ -450,6 +473,15 @@ export function SkillsPage() {
                   icon={<Copy size={16} aria-hidden="true" />}
                   onClick={() => copy(record)}
                 />
+                <Button
+                  type="text"
+                  aria-label="发布到群组"
+                  icon={<Share2 size={16} aria-hidden="true" />}
+                  onClick={() => {
+                    setShareGroupId(undefined);
+                    setSharing(record);
+                  }}
+                />
                 {hasDesktopCommands() && (
                   <>
                     <Button
@@ -572,11 +604,13 @@ export function SkillsPage() {
             <div>
               <Typography.Title level={5}>版本历史</Typography.Title>
               <Table
+                className="skill-version-table"
                 size="small"
                 rowKey="id"
                 pagination={false}
                 loading={versions.isLoading}
                 dataSource={versions.data}
+                scroll={{ x: 560 }}
                 columns={[
                   { title: "版本", dataIndex: "version" },
                   {
@@ -599,9 +633,9 @@ export function SkillsPage() {
                   { title: "变更", dataIndex: "change_log", ellipsis: true },
                   {
                     title: "操作",
-                    width: 130,
+                    width: 176,
                     render: (_: unknown, row: SkillVersion) => (
-                      <Space size={4}>
+                      <div className="skill-version-actions">
                         <Popconfirm
                           title={`回滚到 ${row.version}？`}
                           description="会以该版本内容创建一个新草稿版本。"
@@ -649,7 +683,7 @@ export function SkillsPage() {
                         >
                           下载
                         </Button>
-                      </Space>
+                      </div>
                     ),
                   },
                 ]}
@@ -684,6 +718,38 @@ export function SkillsPage() {
             <Input placeholder="my-skill" />
           </Form.Item>
         </Form>
+      </Modal>
+      <Modal
+        open={Boolean(sharing)}
+        title={sharing ? `发布「${sharing.name}」到群组` : "发布到群组"}
+        okText="发布共享副本"
+        confirmLoading={publishToGroup.isPending}
+        onCancel={() => {
+          setSharing(null);
+          setShareGroupId(undefined);
+        }}
+        onOk={() => {
+          if (!shareGroupId) {
+            message.warning("请选择目标群组");
+            return;
+          }
+          publishToGroup.mutate();
+        }}
+      >
+        <Typography.Paragraph type="secondary">
+          将创建一个独立的群组共享副本，原个人 Skill 不会被移动或覆盖。发布后，群组成员可查看，群组管理员和作者本人可继续维护。
+        </Typography.Paragraph>
+        <Select
+          style={{ width: "100%" }}
+          placeholder="选择目标群组"
+          value={shareGroupId}
+          loading={shareGroups.isLoading}
+          onChange={setShareGroupId}
+          options={shareGroups.data?.map((item) => ({
+            value: item.id,
+            label: item.name,
+          }))}
+        />
       </Modal>
       <DeployModal
         skill={deploying}

@@ -793,6 +793,22 @@ Verified locally on 2026-09-08:
 
 ---
 
+# PART L.1 — GROUP-OWNED SKILL SCENARIO
+
+Before treating the group-owned Skill package as complete, verify locally:
+
+1. A group member publishes a personal Skill to a selected group; the
+   personal source remains private and the group receives an independent
+   shared copy.
+2. A normal group member can read the shared Skill but receives 403 on edits,
+   version/tag changes, rollback, and delete.
+3. The original author and an effective group owner/administrator can edit,
+   create versions, tag/rollback, download a version, and use the group trash
+   restore/purge lifecycle.
+4. A member pull receives the shared Skill change event with `group_id`; a
+   non-member does not receive it. The desktop mirror is read-only for this
+   scope until the local mutation protocol is extended with group ownership.
+
 # PART L — RELEASE STATE RECORD
 
 ## 41. How to record validation

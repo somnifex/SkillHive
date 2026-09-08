@@ -806,6 +806,24 @@ img {
   line-height: 1.7;
 }
 
+.skill-version-table.ant-table-wrapper {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.skill-version-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.skill-version-actions .ant-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .template-format-alert {
   margin-bottom: 16px;
 }
@@ -842,6 +860,22 @@ img {
 
 .page-empty {
   margin-top: 72px;
+}
+
+.group-skill-section {
+  margin-top: 24px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.section-heading .ant-typography {
+  margin: 0;
 }
 
 .empty-icon {

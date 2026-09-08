@@ -7,6 +7,7 @@ from app.db.session import get_db
 from app.permissions.dependencies import CurrentUser
 from app.schemas.common import Page
 from app.schemas.skill import (
+    PublishToGroupRequest,
     SkillCreate,
     SkillRead,
     SkillUpdate,
@@ -15,6 +16,7 @@ from app.schemas.skill import (
     VersionRollbackRequest,
     VersionTagsUpdate,
 )
+from app.services.group_owned_skills import GroupOwnedSkillService
 from app.services.skills import PrivateSkillService
 
 router = APIRouter(prefix="/skills", tags=["private skills"])
@@ -75,6 +77,16 @@ def list_trash(
     return PrivateSkillService(session, user).trash_page(
         page=page, page_size=page_size, query=query
     )
+
+
+@router.post("/{skill_id}/publish-to-group", response_model=SkillRead, status_code=201)
+def publish_skill_to_group(
+    skill_id: str,
+    data: PublishToGroupRequest,
+    user: CurrentUser,
+    session: Annotated[Session, Depends(get_db)],
+) -> SkillRead:
+    return GroupOwnedSkillService(session, user).publish_personal(skill_id, data)
 
 
 @router.get("/{skill_id}", response_model=SkillRead)

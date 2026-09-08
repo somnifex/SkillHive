@@ -79,6 +79,8 @@ class SkillMutationService:
                 "name": skill.name,
                 "slug": skill.slug,
                 "description": skill.description,
+                "skill_type": skill.skill_type,
+                "group_id": skill.group_id,
                 "category": skill.category,
                 "tags": list(skill.tags or []),
                 "status": skill.status,
@@ -117,13 +119,19 @@ class SkillMutationService:
         audit_after_data: Mapping[str, Any] | None = None,
         package_manifest_hash: str | None = None,
         package_size_bytes: int | None = None,
+        group_id: str | None = None,
     ) -> tuple[Skill, SkillVersion]:
+        if skill_type == "group" and group_id is None:
+            raise AppError("GROUP_REQUIRED", "A group Skill must belong to a group.", 422)
+        if skill_type != "group" and group_id is not None:
+            raise AppError("GROUP_SCOPE_INVALID", "Only group Skills may set group_id.", 422)
         skill = Skill(
             name=name.strip(),
             slug=slug,
             description=description,
             skill_type=skill_type,
             owner_user_id=owner_user_id,
+            group_id=group_id,
             category=category,
             tags=list(tags),
             status=skill_status,

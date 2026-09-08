@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
 from app.db.base import utc_now
-from app.models import GroupMember, GroupSkillGrant, Skill, SkillVersion, User
+from app.models import GroupSkillGrant, Skill, SkillVersion, User
 from app.repositories.groups import GroupRepository
 from app.repositories.skills import SkillRepository
 from app.schemas.skill import (
@@ -166,16 +166,20 @@ class GroupSkillService:
         )
         self.session.commit()
 
-    def _membership(self, group_id: str) -> GroupMember:
+    def _membership(self, group_id: str) -> str:
         group = self.groups.get_active(group_id)
-        membership = self.groups.membership(group_id, self.user.id) if group else None
-        if group is None or membership is None:
+        role = (
+            "owner"
+            if self.user.is_global_admin
+            else self.groups.effective_roles([group_id], self.user.id).get(group_id)
+        ) if group else None
+        if group is None or role is None:
             raise AppError("GROUP_NOT_FOUND", "Group was not found.", 404)
-        return membership
+        return role
 
     def _manager(self, group_id: str) -> None:
-        membership = self._membership(group_id)
-        if membership.role not in {"owner", "admin"}:
+        role = self._membership(group_id)
+        if role not in {"owner", "admin"}:
             raise AppError("PERMISSION_DENIED", "Group administrator permission is required.", 403)
 
     def _published_global(self, skill_id: str) -> Skill:

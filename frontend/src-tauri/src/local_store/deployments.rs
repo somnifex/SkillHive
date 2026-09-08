@@ -161,6 +161,15 @@ impl LocalStore {
             )));
         }
 
+        let skill_name: String = transaction
+            .query_row(
+                "SELECT name FROM local_skills WHERE id = ?1",
+                [deployment.skill_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| LocalStoreError::SkillNotFound(deployment.skill_id.clone()))?;
+
         transaction.execute(
             r#"
             INSERT INTO skill_deployments(
@@ -188,6 +197,7 @@ impl LocalStore {
 
         Ok(SkillDeploymentRecord {
             skill_id: deployment.skill_id,
+            skill_name,
             agent_profile_id: deployment.agent_profile_id,
             deployed_blob_hash: deployment.deployed_blob_hash,
             target_path: deployment.target_path,
@@ -205,10 +215,11 @@ impl LocalStore {
         let row = connection
             .query_row(
                 r#"
-                SELECT skill_id, agent_profile_id, deployed_blob_hash, target_path,
-                       state, last_error
-                FROM skill_deployments
-                WHERE skill_id = ?1 AND agent_profile_id = ?2
+                SELECT d.skill_id, COALESCE(s.name, d.skill_id), d.agent_profile_id,
+                       d.deployed_blob_hash, d.target_path, d.state, d.last_error
+                FROM skill_deployments d
+                LEFT JOIN local_skills s ON s.id = d.skill_id
+                WHERE d.skill_id = ?1 AND d.agent_profile_id = ?2
                 "#,
                 params![skill_id, agent_profile_id],
                 |row| {
@@ -218,7 +229,8 @@ impl LocalStore {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 },
             )
@@ -227,11 +239,12 @@ impl LocalStore {
         row.map(|row| {
             Ok(SkillDeploymentRecord {
                 skill_id: row.0,
-                agent_profile_id: row.1,
-                deployed_blob_hash: row.2,
-                target_path: PathBuf::from(row.3),
-                state: DeploymentState::from_db_str(&row.4)?,
-                last_error: row.5,
+                skill_name: row.1,
+                agent_profile_id: row.2,
+                deployed_blob_hash: row.3,
+                target_path: PathBuf::from(row.4),
+                state: DeploymentState::from_db_str(&row.5)?,
+                last_error: row.6,
             })
         })
         .transpose()
@@ -241,10 +254,11 @@ impl LocalStore {
         let connection = self.lock_connection()?;
         let mut statement = connection.prepare(
             r#"
-            SELECT skill_id, agent_profile_id, deployed_blob_hash, target_path,
-                   state, last_error
-            FROM skill_deployments
-            ORDER BY skill_id ASC, agent_profile_id ASC
+            SELECT d.skill_id, COALESCE(s.name, d.skill_id), d.agent_profile_id,
+                   d.deployed_blob_hash, d.target_path, d.state, d.last_error
+            FROM skill_deployments d
+            LEFT JOIN local_skills s ON s.id = d.skill_id
+            ORDER BY s.name ASC, d.skill_id ASC, d.agent_profile_id ASC
             "#,
         )?;
         let rows = statement.query_map([], |row| {
@@ -254,18 +268,20 @@ impl LocalStore {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?;
         rows.map(|row| {
             let row = row?;
             Ok(SkillDeploymentRecord {
                 skill_id: row.0,
-                agent_profile_id: row.1,
-                deployed_blob_hash: row.2,
-                target_path: PathBuf::from(row.3),
-                state: DeploymentState::from_db_str(&row.4)?,
-                last_error: row.5,
+                skill_name: row.1,
+                agent_profile_id: row.2,
+                deployed_blob_hash: row.3,
+                target_path: PathBuf::from(row.4),
+                state: DeploymentState::from_db_str(&row.5)?,
+                last_error: row.6,
             })
         })
         .collect()
@@ -383,7 +399,11 @@ mod tests {
                 last_error: None,
             })
             .expect("deployment");
+        assert_eq!(deployment.skill_name, "Code Review");
         assert_eq!(deployment.state, DeploymentState::Installed);
+
+        let listed = store.list_deployments().expect("list deployments");
+        assert_eq!(listed[0].skill_name, "Code Review");
     }
 
     #[test]

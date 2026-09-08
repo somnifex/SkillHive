@@ -154,6 +154,7 @@ class Skill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "skills"
     __table_args__ = (
         UniqueConstraint("owner_user_id", "slug", name="uq_owner_skill_slug"),
+        UniqueConstraint("group_id", "slug", name="uq_group_skill_slug"),
         CheckConstraint("sync_revision >= 1", name="ck_skill_sync_revision_positive"),
     )
 
@@ -162,6 +163,7 @@ class Skill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     description: Mapped[str] = mapped_column(Text, default="")
     skill_type: Mapped[str] = mapped_column(String(20), index=True)
     owner_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
+    group_id: Mapped[str | None] = mapped_column(ForeignKey("groups.id"), index=True)
     category: Mapped[str] = mapped_column(String(80), default="", index=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)

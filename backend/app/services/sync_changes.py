@@ -6,8 +6,9 @@ current server-authorization filtering (plan §12):
 - private Skills: visible to the owner only, tombstones included;
 - global Skills: visible while published; members with an active grant keep
   receiving the delete tombstone after deletion;
-- group Skills: visible when the Skill is global+published and the caller has
-  an active group membership with an active grant.
+- group Skills: visible to callers with an active relationship to the owning
+  group (effective administrators inherit management visibility from an
+  ancestor group).
 
 Private bodies are never exposed to a global administrator through pull; the
 existing ACL semantics decide visibility. A committed change-log row the
@@ -25,7 +26,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
-from app.models import GroupMember, GroupSkillGrant, Skill, SkillVersion, SyncChangeLog
+from app.models import GroupMember, GroupSkillGrant, Skill, SkillVersion, SyncChangeLog, User
+from app.repositories.groups import GroupRepository
 from app.schemas.sync import SyncChangeItem, SyncChangesResponse
 from app.services.blob_storage import get_blob_storage
 from app.services.entitlements import issue_entitlement_lease
@@ -120,6 +122,7 @@ def _project(session: Session, row: SyncChangeLog, user_id: str) -> SyncChangeIt
         metadata.setdefault("name", skill.name)
         metadata.setdefault("slug", skill.slug)
         metadata.setdefault("skill_type", skill.skill_type)
+        metadata.setdefault("group_id", skill.group_id)
         metadata.setdefault("status", skill.status)
         _ensure_legacy_package(session, skill)
         _attach_entitlement_lease(session, skill, user_id, metadata)
@@ -226,6 +229,8 @@ def _skill_visible(session: Session, skill: Skill | None, row: SyncChangeLog, us
             return False
         if skill.owner_user_id == user_id:
             return True
+        if skill.skill_type == "group" and skill.group_id is not None:
+            return _has_group_access(session, skill.group_id, user_id)
         return _has_active_grant(session, skill.id, user_id)
 
     if skill is None:
@@ -240,7 +245,16 @@ def _skill_visible(session: Session, skill: Skill | None, row: SyncChangeLog, us
         # Draft/disabled global Skills stay invisible until republished.
         return skill.status == "published"
 
+    if skill.skill_type == "group":
+        return skill.group_id is not None and _has_group_access(session, skill.group_id, user_id)
+
     return False
+
+
+def _has_group_access(session: Session, group_id: str, user_id: str) -> bool:
+    if session.scalar(select(User.is_global_admin).where(User.id == user_id)):
+        return True
+    return group_id in GroupRepository(session).effective_roles([group_id], user_id)
 
 
 def _has_active_grant(session: Session, skill_id: str, user_id: str) -> bool:

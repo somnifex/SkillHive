@@ -51,6 +51,7 @@ export async function exportSkillZip(skillId: string): Promise<string | null> {
 
 export interface SkillDeploymentRecord {
   skillId: string;
+  skillName: string;
   agentProfileId: string;
   deployedBlobHash: string;
   targetPath: string;

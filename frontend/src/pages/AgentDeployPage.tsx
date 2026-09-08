@@ -306,7 +306,12 @@ export function AgentDeployPage() {
         locale={{ emptyText: <Empty description="还没有部署任何 Skill" /> }}
         pagination={false}
         columns={[
-          { title: "Skill", dataIndex: "skillId", ellipsis: true },
+          {
+            title: "Skill",
+            dataIndex: "skillName",
+            ellipsis: true,
+            render: (value: string, record: SkillDeploymentRecord) => value || record.skillId,
+          },
           {
             title: "目标",
             dataIndex: "agentProfileId",

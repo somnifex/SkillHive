@@ -106,7 +106,7 @@ Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
 - backend: `uv run ruff check backend` clean; `uv run mypy backend/app
 
   backend/tests` clean (strict, 86 files); `uv run pytest backend/tests` →
-  **130 passed**; Alembic fresh → head (`f7a8b9c0d1e2`) and staged upgrades
+  **130 passed**; Alembic fresh → head (`g1h2i3j4k5l6`) and staged upgrades
   `c4d5e6f7a8b9 → e8f1a2b3c4d5 → f7a8b9c0d1e2` with legacy data intact,
   `ck_groups_parent_not_self` enforced.
 - frontend: `pnpm lint/typecheck/test/build` all green.
@@ -120,6 +120,33 @@ Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
 - PostgreSQL/MySQL migration re-validation still bypassed per owner
 
   instruction (no server available) — unchanged from the standing record.
+
+### Group-owned Skills (2026-09-08, current worktree)
+
+- Added first-class `group` Skills (`skills.group_id` plus a group/slug
+
+  uniqueness constraint). Publishing a personal Skill creates an independent
+  group-owned copy and leaves the personal source unchanged.
+- Active group members can read/create shared Skills. Effective group owners/
+
+  administrators and the original author can edit metadata/content, manage
+  versions/tags, roll back, download, trash, restore, and purge. Authorization
+  is enforced in the backend service layer; frontend `can_manage` is display
+  state only.
+- Added group Skill REST routes and the personal-to-group publish action. The
+
+  change feed now projects group Skills to effective group members and carries
+  `group_id` metadata for desktop mirrors. Desktop local editing of group
+  Skills remains read-only until the local mutation protocol carries group
+  scope explicitly.
+- New migration: `g1h2i3j4k5l6_add_group_owned_skills.py` (Alembic head).
+- Local validation for this package: `uv run ruff check backend`,
+
+  `uv run mypy backend/app backend/tests`, and the full backend suite (**139
+  passed**) pass; frontend `pnpm.cmd lint`, `typecheck`, `test` (**3 passed**),
+  and `build` pass. The first sandboxed Vitest/build attempts were denied by
+  esbuild directory access and were rerun successfully with the approved
+  local validation permission.
 
 ### Landed 2026-09-07 (desktop productization, branch `feat/desktop-productization`)
 

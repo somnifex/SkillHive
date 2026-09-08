@@ -153,6 +153,7 @@ class SkillRead(ORMModel):
     description: str
     skill_type: str
     owner_user_id: str | None
+    group_id: str | None
     category: str
     tags: list[str]
     status: str
@@ -162,6 +163,7 @@ class SkillRead(ORMModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+    can_manage: bool = False
     # Set only while the skill sits in the trash (status == 'deleted').
     deleted_at: datetime | None = None
     current_version: SkillVersionRead | None = None
@@ -177,6 +179,10 @@ class GlobalSkillUpdate(SkillUpdate):
 
 class PublishSkillRequest(BaseModel):
     version_id: str | None = None
+
+
+class PublishToGroupRequest(BaseModel):
+    group_id: str = Field(min_length=1, max_length=36)
 
 
 OfflinePolicy = Literal["unlimited", "ttl", "disabled"]

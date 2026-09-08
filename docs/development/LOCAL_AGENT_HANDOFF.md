@@ -1586,6 +1586,26 @@ Do not ignore source migrations, snapshot test fixtures, or intentionally versio
 
 ---
 
+# PART E.1 — GROUP-OWNED SKILLS (2026-09-08)
+
+The current worktree adds a first-class group-owned Skill scope. A personal
+Skill is copied, rather than moved, when published to a group. The new group
+resource keeps the author in `created_by`, stores its ownership in
+`skills.group_id`, and is exposed through `/groups/{group_id}/skills/shared`.
+
+The service layer requires an active effective relationship with the group for
+read access. Effective owners/administrators and the original author may
+mutate content, metadata, versions, tags, rollback, and trash lifecycle;
+ordinary members are read-only. The group change-feed projection follows the
+same group visibility rule. Desktop pull can mirror these resources, but local
+desktop mutation remains intentionally unsupported until the mutation protocol
+and local schema carry group scope explicitly.
+
+Migration `g1h2i3j4k5l6_add_group_owned_skills.py` follows the actual Alembic
+head `a9b0c1d2e3f4` and is SQLite batch-migration tested.
+
+---
+
 # PART F — HANDOFF START PROCEDURE
 
 ## 30. First local-agent session

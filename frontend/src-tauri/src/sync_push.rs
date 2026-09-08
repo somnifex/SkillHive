@@ -79,7 +79,6 @@ pub struct ConflictHeadPayload {
     pub remote_skill_id: String,
     #[allow(dead_code)]
     pub revision: i64,
-    #[allow(dead_code)]
     pub package_manifest_hash: Option<String>,
 }
 
@@ -92,6 +91,10 @@ impl MutationResponse {
             remote_skill_id: self.result.as_ref().map(|r| r.remote_skill_id.clone()),
             revision: self.result.as_ref().map(|r| r.revision),
             conflict_head_revision: self.conflict.as_ref().map(|head| head.revision),
+            conflict_package_manifest_hash: self
+                .conflict
+                .as_ref()
+                .and_then(|head| head.package_manifest_hash.clone()),
             error_code: self.error_code,
             message: self.message,
         }
@@ -210,7 +213,7 @@ mod tests {
             "conflict": {
                 "remoteSkillId": "remote-1",
                 "revision": 7,
-                "packageManifestHash": null,
+                "packageManifestHash": "sha256:remote",
                 "metadata": {}
             }
         });
@@ -218,5 +221,9 @@ mod tests {
         let outcome = response.into_outcome();
         assert_eq!(outcome.status, "conflict");
         assert_eq!(outcome.conflict_head_revision, Some(7));
+        assert_eq!(
+            outcome.conflict_package_manifest_hash.as_deref(),
+            Some("sha256:remote")
+        );
     }
 }

@@ -747,6 +747,15 @@ Required future tests:
 - invalid package closure -> no Skill mutation/change/receipt success;
 - transaction rollback leaves no partial change-feed/receipt.
 
+Verified locally on 2026-09-08:
+
+- SQLite concurrent sync writers using the same base revision -> one ACK and
+
+  one explicit conflict; no duplicate technical revision;
+- conflict response package hash reaches the durable local remote-head state;
+
+  keep-remote refuses when that hash is unknown.
+
 ## 39. Durable pull
 
 Required future tests:
@@ -772,6 +781,15 @@ Required future tests:
 - persisted backoff survives restart;
 - no tight retry loop;
 - unrelated Skills can eventually progress without violating same-Skill causality.
+
+Verified locally on 2026-09-08:
+
+- a failed first dispatch releases the undispatched tail of a multi-Skill
+
+  claimed batch from `in_flight` to `retryable_error`;
+- claim leaves `retry_count` unchanged and a persisted transport failure
+
+  increments it exactly once, producing 1/2/4/8-second backoff steps.
 
 ---
 

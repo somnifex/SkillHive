@@ -1,9 +1,9 @@
 from math import ceil
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
+from app.db.session import begin_sqlite_immediate_write
 from app.models import Skill, User
 from app.repositories.skills import SkillRepository
 from app.schemas.common import Page
@@ -323,10 +323,7 @@ class PrivateSkillService:
         mutations for the request and the authenticated User object is
         re-used only by identity.
         """
-        bind = self.session.get_bind()
-        if bind.dialect.name == "sqlite":
-            self.session.rollback()
-            self.session.execute(text("BEGIN IMMEDIATE"))
+        begin_sqlite_immediate_write(self.session)
 
     def _read(self, skill: Skill, *, include_content: bool = True) -> SkillRead:
         current = self.repository.version(skill.current_version_id) if include_content else None

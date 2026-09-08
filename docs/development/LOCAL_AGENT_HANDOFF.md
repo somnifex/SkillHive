@@ -1152,6 +1152,34 @@ Before M2 is VERIFIED, run locally:
 
 No scenario may silently lose an acknowledged local edit or overwrite a newer server revision.
 
+### 14.1 Sync reliability review follow-up (2026-09-08, local branch)
+
+The local branch `codex/fix-sync-reliability` closes four review findings
+without changing the protocol contract:
+
+- SQLite sync mutation submission starts an immediate write transaction before
+
+  reading the receipt/device/Skill head, sharing the same boundary as private
+  REST writes. A targeted concurrent endpoint test proves one same-base writer
+  ACKs and the other receives `REVISION_CONFLICT`.
+- The desktop worker releases the undispatched tail of a claimed batch back to
+
+  `retryable_error` after the first dispatch failure. The active mutation keeps
+  its own outcome and stable ID.
+- Conflict responses carry `packageManifestHash` through the push decoder and
+
+  ACK transaction into `local_skills.remote_blob_hash`. Keep-remote requires a
+  known remote package hash and adopts that hash explicitly.
+- `retry_count` is incremented only when a transport error is persisted, so
+
+  the durable backoff remains 1, 2, 4, 8, 16, 32, 64 seconds.
+
+Local validation passed: backend `uv run ruff check backend`, strict mypy,
+and `uv run pytest` (**138 passed**); frontend lint/typecheck/test/build;
+`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
+warnings`, and `cargo test --lib` (**126 passed**). F5 remains intentionally
+deferred.
+
 ---
 
 ## 15. M3 — enterprise permission/offline authorization plan

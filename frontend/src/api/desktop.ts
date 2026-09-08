@@ -141,6 +141,7 @@ export interface DesktopConflict {
   localSnapshotHash: string;
   localBaseRevision: number | null;
   remoteHeadRevision: number | null;
+  remotePackageManifestHash: string | null;
   mutationId: string;
   mutationOperation: string;
 }

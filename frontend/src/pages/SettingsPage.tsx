@@ -68,6 +68,12 @@ function ConflictCenter() {
               render: (value: number | null) => value ?? "未知",
             },
             {
+              title: "远端包 Hash",
+              dataIndex: "remotePackageManifestHash",
+              ellipsis: true,
+              render: (value: string | null) => value ?? "未知",
+            },
+            {
               title: "状态",
               render: () => <Tag color="warning">待解决</Tag>,
             },

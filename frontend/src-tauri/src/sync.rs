@@ -16,9 +16,10 @@
 //! cursor, persisted backoff), not in worker memory: every step either
 //! durably advances state or leaves the exact prior durable state, so a
 //! crash at any point resumes safely on the next cycle. Cancellation
-//! never deletes or regenerates a claimed mutation ID — an interrupted
-//! dispatch leaves the mutation `in_flight`, which startup recovery
-//! requeues under the same ID.
+//! never deletes or regenerates a claimed mutation ID.  An interrupted
+//! dispatch leaves the active mutation `in_flight`, which startup recovery
+//! requeues under the same ID; an undispatched tail from a failed batch is
+//! released immediately so unrelated Skills do not wait for a restart.
 //!
 //! Errors are classified per plan §15 and recorded in
 //! `local_sync_state.last_server_error` (message only — never tokens or
@@ -271,8 +272,9 @@ impl SyncEngine {
         // flows when only push is failing.
         let mut pushed = 0_usize;
         let mut push_failure: Option<SyncCycleError> = None;
-        for mutation in store.claim_dispatchable_mutations(MAX_MUTATIONS_PER_CYCLE)? {
-            match dispatch_mutation(client, store, blobs, &mutation) {
+        let claimed = store.claim_dispatchable_mutations(MAX_MUTATIONS_PER_CYCLE)?;
+        for (index, mutation) in claimed.iter().enumerate() {
+            match dispatch_mutation(client, store, blobs, mutation) {
                 Ok(()) => pushed += 1,
                 Err(error) => {
                     // M4: mutation-lifecycle diagnostics — outcome class and
@@ -286,6 +288,12 @@ impl SyncEngine {
                             ("error", &failure_message(&error)),
                         ],
                     );
+                    let undispatched_ids: Vec<String> = claimed
+                        .iter()
+                        .skip(index + 1)
+                        .map(|candidate| candidate.id.clone())
+                        .collect();
+                    store.release_in_flight_mutations(&undispatched_ids)?;
                     push_failure = Some(error);
                     break;
                 }
@@ -398,6 +406,7 @@ fn dispatch_mutation(
                     remote_skill_id: None,
                     revision: None,
                     conflict_head_revision: None,
+                    conflict_package_manifest_hash: None,
                     error_code: Some(error_code),
                     message: Some(error_message),
                 }

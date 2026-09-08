@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
-from app.db.session import get_db
+from app.db.session import begin_sqlite_immediate_write, get_db
 from app.permissions.dependencies import CurrentUser
 from app.schemas.sync import (
     MAX_BLOB_BYTES,
@@ -125,6 +125,11 @@ def submit_mutation(
     returned as protocol responses with HTTP 200; only transport-grade
     conditions (missing blobs, revoked device) surface as HTTP errors.
     """
+    # ``with_for_update`` in the shared mutation service is effective on
+    # PostgreSQL, but SQLite ignores it.  Establish the writer boundary before
+    # reading the device/receipt/Skill head so base-revision validation and the
+    # revision increment are one serialized transaction on every backend.
+    begin_sqlite_immediate_write(session)
     device = validate_active_device(session, user.id, str(request.device_id))
     payload = apply_sync_mutation(
         session,

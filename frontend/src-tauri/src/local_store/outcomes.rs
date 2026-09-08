@@ -34,6 +34,9 @@ pub struct MutationOutcome {
     pub remote_skill_id: Option<String>,
     pub revision: Option<i64>,
     pub conflict_head_revision: Option<i64>,
+    /// Remote package identity returned with a revision conflict. The local
+    /// snapshot remains in `current_blob_hash` until the user resolves it.
+    pub conflict_package_manifest_hash: Option<String>,
     pub error_code: Option<String>,
     pub message: Option<String>,
 }
@@ -46,6 +49,7 @@ impl MutationOutcome {
             remote_skill_id: None,
             revision: None,
             conflict_head_revision: None,
+            conflict_package_manifest_hash: None,
             error_code: Some(error_code.to_owned()),
             message: Some(message.to_owned()),
         }
@@ -276,25 +280,34 @@ fn apply_definitive_error(
     )?;
 
     // A conflict carries the server's remote head in
-    // `conflict_head_revision`; recording it on the Skill row gives the
-    // resolution path the true base to re-queue against. Without this the
-    // stale local revision would be reused and the retried update would
-    // conflict again.
+    // `conflict_head_revision` and the remote package identity are recorded
+    // separately from the local snapshot. The resolution path can therefore
+    // adopt the remote package without ever pretending the local bytes are
+    // the remote head.
     transaction.execute(
         r#"
         UPDATE local_skills
         SET remote_revision = COALESCE(?3, remote_revision),
+            remote_blob_hash = CASE
+                WHEN ?2 = 'conflict' THEN COALESCE(?4, remote_blob_hash)
+                ELSE remote_blob_hash
+            END,
             sync_state = ?2,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?1
         "#,
-        params![raw.skill_id, skill_state, outcome.conflict_head_revision],
+        params![
+            raw.skill_id,
+            skill_state,
+            outcome.conflict_head_revision,
+            outcome.conflict_package_manifest_hash,
+        ],
     )?;
     Ok(())
 }
 
 /// Bounded exponential backoff: 1, 2, 4, 8, 16, 32, 64 seconds, capped at
-/// 300 seconds. Persisted via `next_attempt_at` so the schedule survives
+/// 64 seconds. Persisted via `next_attempt_at` so the schedule survives
 /// restart; a deterministic delay is sufficient for M2's single serialized
 /// worker (jitter can be layered in M2.6 without changing this contract).
 fn backoff_seconds(retry_count: u32) -> u64 {
@@ -361,6 +374,7 @@ mod tests {
             remote_skill_id: Some("remote-1".to_owned()),
             revision: Some(revision),
             conflict_head_revision: None,
+            conflict_package_manifest_hash: None,
             error_code: None,
             message: None,
         }
@@ -426,6 +440,7 @@ mod tests {
                 remote_skill_id: Some("remote-1".to_owned()),
                 revision: None,
                 conflict_head_revision: Some(9),
+                conflict_package_manifest_hash: Some("sha256:remote".to_owned()),
                 error_code: Some("REVISION_CONFLICT".to_owned()),
                 message: Some("server head advanced".to_owned()),
             })
@@ -436,6 +451,7 @@ mod tests {
         let skill = store.get_skill("skill-1").expect("read").expect("skill");
         assert_eq!(skill.sync_state, SkillSyncState::Conflict);
         assert_eq!(skill.current_blob_hash, "sha256:abc123");
+        assert_eq!(skill.remote_blob_hash.as_deref(), Some("sha256:remote"));
         // The conflict's remote head is persisted on the Skill row so the
         // resolution path re-queues against the true server head.
         assert_eq!(skill.remote_revision, Some(9));
@@ -454,6 +470,7 @@ mod tests {
                 remote_skill_id: Some("remote-1".to_owned()),
                 revision: None,
                 conflict_head_revision: Some(9),
+                conflict_package_manifest_hash: Some("sha256:remote".to_owned()),
                 error_code: Some("REVISION_CONFLICT".to_owned()),
                 message: Some("server head advanced".to_owned()),
             })
@@ -529,6 +546,8 @@ mod tests {
         let mutation = store
             .commit_skill_edit(sample_edit("skill-1"))
             .expect("commit");
+        let claimed = store.claim_dispatchable_mutations(10).expect("claim");
+        assert_eq!(claimed[0].retry_count, 0);
 
         let applied = store
             .apply_mutation_outcome(&MutationOutcome::transport_error(
@@ -538,6 +557,17 @@ mod tests {
             ))
             .expect("apply");
         assert_eq!(applied.mutation_state, MutationState::RetryableError);
+
+        let connection = store.lock_connection().expect("connection");
+        let retry_count: i64 = connection
+            .query_row(
+                "SELECT retry_count FROM local_mutations WHERE id = ?1",
+                [mutation.id],
+                |row| row.get(0),
+            )
+            .expect("retry count");
+        assert_eq!(retry_count, 1);
+        drop(connection);
 
         // Not dispatchable until the persisted backoff window elapses.
         assert!(store
@@ -560,6 +590,7 @@ mod tests {
                 remote_skill_id: None,
                 revision: None,
                 conflict_head_revision: None,
+                conflict_package_manifest_hash: None,
                 error_code: Some("SKILL_SLUG_TAKEN".to_owned()),
                 message: Some("slug taken".to_owned()),
             })
@@ -587,6 +618,7 @@ mod tests {
                 remote_skill_id: None,
                 revision: None,
                 conflict_head_revision: None,
+                conflict_package_manifest_hash: None,
                 error_code: Some("SKILL_NOT_FOUND".to_owned()),
                 message: Some("not found".to_owned()),
             })

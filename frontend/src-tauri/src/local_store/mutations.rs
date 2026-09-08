@@ -192,7 +192,6 @@ impl LocalStore {
                 r#"
                 UPDATE local_mutations
                 SET state = 'in_flight',
-                    retry_count = retry_count + 1,
                     last_attempt_at = CURRENT_TIMESTAMP,
                     next_attempt_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
@@ -208,6 +207,40 @@ impl LocalStore {
 
         transaction.commit()?;
         Ok(claimed)
+    }
+
+    /// Releases claims that were made for a batch but never dispatched after
+    /// an earlier mutation stopped the cycle.  The current failed mutation
+    /// owns its normal outcome; only the untouched tail is returned to the
+    /// retryable queue so unrelated Skills are not stranded in `in_flight`.
+    pub fn release_in_flight_mutations(
+        &self,
+        mutation_ids: &[String],
+    ) -> Result<u64, LocalStoreError> {
+        if mutation_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut released = 0_u64;
+        for mutation_id in mutation_ids {
+            released += u64::from(
+                transaction.execute(
+                    r#"
+                    UPDATE local_mutations
+                    SET state = 'retryable_error',
+                        next_attempt_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?1 AND state = 'in_flight'
+                    "#,
+                    [mutation_id.as_str()],
+                )? == 1,
+            );
+        }
+
+        transaction.commit()?;
+        Ok(released)
     }
 
     /// On process restart an in-flight request has an unknown remote outcome.
@@ -464,7 +497,7 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, original.id);
         assert_eq!(claimed[0].state, MutationState::InFlight);
-        assert_eq!(claimed[0].retry_count, 1);
+        assert_eq!(claimed[0].retry_count, 0);
         assert!(store
             .claim_dispatchable_mutations(10)
             .expect("second claim")
@@ -474,7 +507,44 @@ mod tests {
         let retried = store.claim_dispatchable_mutations(10).expect("retry claim");
         assert_eq!(retried.len(), 1);
         assert_eq!(retried[0].id, original.id);
-        assert_eq!(retried[0].retry_count, 2);
+        assert_eq!(retried[0].retry_count, 0);
+    }
+
+    #[test]
+    fn undispatched_batch_tail_is_released_for_retry() {
+        let (_temp, store) = open_temp_store();
+        let first = store
+            .commit_skill_edit(sample_edit("skill-1"))
+            .expect("first");
+        let second = store
+            .commit_skill_edit(sample_edit("skill-2"))
+            .expect("second");
+
+        let claimed = store.claim_dispatchable_mutations(10).expect("claim");
+        assert_eq!(claimed.len(), 2);
+        assert_eq!(
+            store
+                .release_in_flight_mutations(std::slice::from_ref(&second.id))
+                .expect("release"),
+            1
+        );
+
+        let dispatchable = store.list_dispatchable_mutations(10).expect("dispatchable");
+        assert_eq!(dispatchable.len(), 1);
+        assert_eq!(dispatchable[0].id, second.id);
+        assert_eq!(dispatchable[0].state, MutationState::RetryableError);
+
+        // The mutation that failed before this tail was dispatched remains
+        // in-flight until its own outcome or restart recovery resolves it.
+        let connection = store.lock_connection().expect("connection");
+        let first_state: String = connection
+            .query_row(
+                "SELECT state FROM local_mutations WHERE id = ?1",
+                [first.id],
+                |row| row.get(0),
+            )
+            .expect("first state");
+        assert_eq!(first_state, "in_flight");
     }
 
     #[test]

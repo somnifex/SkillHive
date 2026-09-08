@@ -43,6 +43,9 @@ pub struct ConflictRecord {
     /// Remote head revision as last observed by pull or the server's
     /// conflict response. `None` means the remote head is unknown.
     pub remote_head_revision: Option<i64>,
+    /// Remote package identity, when the conflict response or pull supplied
+    /// one. The local snapshot remains separate until resolution.
+    pub remote_package_manifest_hash: Option<String>,
     pub mutation_id: String,
     pub mutation_operation: MutationOperation,
 }
@@ -65,7 +68,8 @@ impl LocalStore {
         let mut statement = connection.prepare(
             r#"
             SELECT s.id, s.name, s.slug, s.current_blob_hash,
-                   m.base_revision, s.remote_revision, m.id, m.operation
+                   m.base_revision, s.remote_revision, s.remote_blob_hash,
+                   m.id, m.operation
             FROM local_skills s
             JOIN local_mutations m
               ON m.skill_id = s.id AND m.state = 'conflict'
@@ -86,8 +90,9 @@ impl LocalStore {
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<i64>>(4)?,
                 row.get::<_, Option<i64>>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(6)?,
                 row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })?;
 
@@ -99,6 +104,7 @@ impl LocalStore {
                 local_snapshot_hash,
                 local_base_revision,
                 remote_head_revision,
+                remote_package_manifest_hash,
                 mutation_id,
                 operation,
             ) = row?;
@@ -109,6 +115,7 @@ impl LocalStore {
                 local_snapshot_hash,
                 local_base_revision,
                 remote_head_revision,
+                remote_package_manifest_hash,
                 mutation_id,
                 mutation_operation: MutationOperation::from_db_str(&operation)?,
             })
@@ -215,20 +222,28 @@ impl LocalStore {
 
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let _skill = read_skill_for_resolution(&transaction, skill_id)?;
+        let skill = read_skill_for_resolution(&transaction, skill_id)?;
+        let remote_package_manifest_hash = skill
+            .remote_blob_hash
+            .filter(|hash| !hash.is_empty())
+            .ok_or_else(|| {
+                LocalStoreError::InvalidInput(format!(
+                    "cannot keep remote for {skill_id}: remote package hash unknown; pull the remote head first"
+                ))
+            })?;
 
         supersede_conflict_chain(&transaction, skill_id)?;
 
         transaction.execute(
             r#"
             UPDATE local_skills
-            SET current_blob_hash = COALESCE(remote_blob_hash, current_blob_hash),
+            SET current_blob_hash = ?2,
                 remote_blob_hash = NULL,
                 sync_state = 'remote_only',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?1
             "#,
-            params![skill_id],
+            params![skill_id, remote_package_manifest_hash],
         )?;
 
         transaction.commit()?;
@@ -242,6 +257,7 @@ impl LocalStore {
 struct SkillForResolution {
     remote_revision: Option<i64>,
     local_snapshot_hash: String,
+    remote_blob_hash: Option<String>,
 }
 
 fn read_skill_for_resolution(
@@ -251,7 +267,7 @@ fn read_skill_for_resolution(
     let row = transaction
         .query_row(
             r#"
-            SELECT remote_revision, current_blob_hash, sync_state
+            SELECT remote_revision, current_blob_hash, remote_blob_hash, sync_state
             FROM local_skills
             WHERE id = ?1
             "#,
@@ -260,13 +276,14 @@ fn read_skill_for_resolution(
                 Ok((
                     row.get::<_, Option<i64>>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
         .optional()?;
 
-    let (remote_revision, local_snapshot_hash, sync_state) =
+    let (remote_revision, local_snapshot_hash, remote_blob_hash, sync_state) =
         row.ok_or_else(|| LocalStoreError::SkillNotFound(skill_id.to_owned()))?;
     if sync_state != "conflict" {
         return Err(LocalStoreError::InvalidInput(format!(
@@ -276,6 +293,7 @@ fn read_skill_for_resolution(
     Ok(SkillForResolution {
         remote_revision,
         local_snapshot_hash,
+        remote_blob_hash,
     })
 }
 
@@ -335,6 +353,7 @@ mod tests {
                 remote_skill_id: Some("remote-1".to_owned()),
                 revision: None,
                 conflict_head_revision: Some(7),
+                conflict_package_manifest_hash: Some("sha256:remote".to_owned()),
                 error_code: Some("REVISION_CONFLICT".to_owned()),
                 message: Some("server head advanced".to_owned()),
             })
@@ -365,6 +384,10 @@ mod tests {
         assert_eq!(record.local_snapshot_hash, "sha256:local");
         assert_eq!(record.local_base_revision, Some(1));
         assert_eq!(record.remote_head_revision, Some(7));
+        assert_eq!(
+            record.remote_package_manifest_hash.as_deref(),
+            Some("sha256:remote")
+        );
         assert_eq!(record.mutation_operation, MutationOperation::Update);
     }
 
@@ -451,7 +474,8 @@ mod tests {
 
         let skill = store.get_skill("skill-1").expect("read").expect("skill");
         assert_eq!(skill.sync_state, SkillSyncState::RemoteOnly);
-        assert_eq!(skill.current_blob_hash, "sha256:local");
+        assert_eq!(skill.current_blob_hash, "sha256:remote");
+        assert_eq!(skill.remote_blob_hash, None);
         assert!(store.list_dispatchable_mutations(10).expect("d").is_empty());
         assert!(store.list_conflicts().expect("list").is_empty());
     }
@@ -464,6 +488,29 @@ mod tests {
             .resolve_keep_remote("skill-1", false)
             .expect_err("must refuse");
         assert!(matches!(error, LocalStoreError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn keep_remote_refuses_unknown_remote_package() {
+        let (_temp, store) = open_temp_store();
+        commit_and_conflict(&store, "skill-1");
+        {
+            let connection = store.lock_connection().expect("conn");
+            connection
+                .execute(
+                    "UPDATE local_skills SET remote_blob_hash = NULL WHERE id = 'skill-1'",
+                    [],
+                )
+                .expect("clear remote hash");
+        }
+
+        let error = store
+            .resolve_keep_remote("skill-1", true)
+            .expect_err("must refuse without remote package hash");
+        assert!(matches!(error, LocalStoreError::InvalidInput(_)));
+        let skill = store.get_skill("skill-1").expect("read").expect("skill");
+        assert_eq!(skill.sync_state, SkillSyncState::Conflict);
+        assert_eq!(skill.current_blob_hash, "sha256:local");
     }
 
     #[test]

@@ -6,10 +6,13 @@ verification, per-user authorization, and revoked-device rejection.
 """
 
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event, Lock
 from typing import Any, cast
 from uuid import uuid4
 
+import app.services.sync_mutations as sync_mutations
 import pytest
 from app.db.base import Base
 from app.db.session import get_db
@@ -118,6 +121,10 @@ def _upload_package(
     manifest_bytes = json.dumps(manifest).encode("utf-8")
     manifest_hash = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
     register_verified_blob(session, storage, manifest_hash, manifest_bytes)
+    # The sync endpoint deliberately rolls back any pre-existing SQLite
+    # transaction before BEGIN IMMEDIATE. Make fixture uploads durable, just
+    # like the real blob-upload endpoint, before submitting a mutation.
+    session.commit()
     return manifest_hash
 
 
@@ -259,6 +266,113 @@ def test_update_mutation_enforces_base_revision(
     assert current.status_code == 200
     assert current.json()["status"] == "acked"
     assert current.json()["result"]["revision"] == revision + 1
+
+
+def test_concurrent_sync_updates_serialize_sqlite_revision(
+    push_client: TestClient,
+    push_session: Session,
+    push_storage: LocalFilesystemBlobStorage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite sync writes cannot both pass the same base-revision check."""
+    headers = _register_user(push_client, "sync-race")
+    device = _register_device(push_client, headers)
+    manifest_a = _upload_package(push_client, headers, push_storage, push_session, "# A")
+    created = push_client.post(
+        "/api/v1/sync/mutations",
+        headers=headers,
+        json=_mutation_request(
+            "create",
+            device_id=device["deviceId"],
+            package_manifest_hash=manifest_a,
+            metadata={**_METADATA, "slug": "sync-race"},
+        ),
+    )
+    assert created.status_code == 200
+    remote_skill_id = created.json()["result"]["remoteSkillId"]
+    base_revision = created.json()["result"]["revision"]
+
+    manifest_b = _upload_package(push_client, headers, push_storage, push_session, "# B")
+    manifest_c = _upload_package(push_client, headers, push_storage, push_session, "# C")
+    push_session.commit()
+
+    # Give each concurrent request its own SQLAlchemy Session while keeping
+    # the same SQLite database file. The auth dependency and endpoint then
+    # exercise the real BEGIN IMMEDIATE boundary.
+    engine = push_session.get_bind()
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    original_override = app.dependency_overrides.get(get_db)
+
+    def request_db() -> Generator[Session, None, None]:
+        with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = request_db
+
+    first_entered = Event()
+    second_entered = Event()
+    release_first = Event()
+    call_lock = Lock()
+    call_count = 0
+    real_handle_update = sync_mutations._handle_update
+
+    def paused_handle_update(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal call_count
+        with call_lock:
+            call_count += 1
+            call_number = call_count
+        if call_number == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=10)
+        else:
+            second_entered.set()
+        return real_handle_update(*args, **kwargs)
+
+    monkeypatch.setattr(sync_mutations, "_handle_update", paused_handle_update)
+
+    def update_payload(manifest_hash: str, name: str) -> dict[str, Any]:
+        return _mutation_request(
+            "update",
+            device_id=device["deviceId"],
+            remote_skill_id=remote_skill_id,
+            base_revision=base_revision,
+            package_manifest_hash=manifest_hash,
+            metadata={**_METADATA, "slug": "sync-race", "name": name},
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(
+                push_client.post,
+                "/api/v1/sync/mutations",
+                headers=headers,
+                json=update_payload(manifest_b, "First update"),
+            )
+            assert first_entered.wait(timeout=5)
+            second_future = executor.submit(
+                push_client.post,
+                "/api/v1/sync/mutations",
+                headers=headers,
+                json=update_payload(manifest_c, "Second update"),
+            )
+            second_reached_mutation = second_entered.wait(timeout=0.25)
+            release_first.set()
+            first_response = first_future.result(timeout=10)
+            second_response = second_future.result(timeout=10)
+    finally:
+        release_first.set()
+        if original_override is None:
+            app.dependency_overrides.pop(get_db, None)
+        else:
+            app.dependency_overrides[get_db] = original_override
+
+    assert not second_reached_mutation, "the second writer bypassed SQLite serialization"
+    bodies = [first_response.json(), second_response.json()]
+    assert sorted(body["status"] for body in bodies) == ["acked", "conflict"]
+    ack = next(body for body in bodies if body["status"] == "acked")
+    conflict = next(body for body in bodies if body["status"] == "conflict")
+    assert ack["result"]["revision"] == base_revision + 1
+    assert conflict["conflict"]["revision"] == base_revision + 1
 
 
 def test_missing_blob_upload_leaves_mutation_retryable(

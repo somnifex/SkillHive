@@ -1,6 +1,6 @@
 # SkillHive Current Development Status
 
-Updated: 2026-09-07
+Updated: 2026-09-08
 
 This file contains the **current dynamic repository state** and supersedes branch/PR metadata captured at the top of `LOCAL_AGENT_HANDOFF.md`.
 
@@ -248,6 +248,32 @@ Manager tests could not access the host credential store from the review
 sandbox; the implementing local-agent run reported the full serial suite at
 124 passed outside that restriction. The code fixes are recorded in
 `d0fb9e2`; this status-document update remains uncommitted.
+
+### Sync reliability review follow-up (2026-09-08, local branch)
+
+The follow-up review fixes are implemented on `codex/fix-sync-reliability` and
+are intentionally not described as merged into `main` yet:
+
+- sync mutation writes now share the SQLite `BEGIN IMMEDIATE` boundary with
+
+  REST private Skill writes; a concurrent same-base update has one ACK and one
+  explicit conflict rather than two same-revision effects;
+- a failed bounded push batch releases its undispatched tail from
+
+  `in_flight` to `retryable_error`, so unrelated Skills do not require a
+  process restart;
+- conflict outcomes persist the server package manifest hash, expose it to the
+
+  conflict center, and reject keep-remote when the hash is unknown;
+- outbox claim no longer increments `retry_count`; transport failure is the
+
+  single increment point, preserving the documented 1/2/4/8-second schedule.
+
+Validation on Windows: backend Ruff + strict mypy clean and **138 pytest
+passed**; frontend lint/typecheck/test/build green; Rust fmt/clippy clean and
+**126 library tests passed**, including Windows Credential Manager tests.
+F5 review notes (BLOB_MISSING classification, portable workspace placeholder,
+legacy pull-write behavior) remain deferred.
 
 ## Current milestone state
 

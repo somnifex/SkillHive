@@ -15,13 +15,13 @@ impl LocalStore {
             .query_row(
                 r#"
                 SELECT id, remote_id, name, slug, workspace_path, current_blob_hash,
-                       remote_revision, sync_state, pinned
+                       remote_blob_hash, remote_revision, sync_state, pinned
                 FROM local_skills
                 WHERE id = ?1
                 "#,
                 [skill_id],
                 |row| {
-                    let sync_state: String = row.get(7)?;
+                    let sync_state: String = row.get(8)?;
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
@@ -29,9 +29,10 @@ impl LocalStore {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
-                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
                         sync_state,
-                        row.get::<_, bool>(8)?,
+                        row.get::<_, bool>(9)?,
                     ))
                 },
             )
@@ -53,9 +54,10 @@ impl LocalStore {
             slug: row.3,
             workspace_path: PathBuf::from(row.4),
             current_blob_hash: row.5,
-            remote_revision: row.6,
-            sync_state: SkillSyncState::from_db_str(&row.7)?,
-            pinned: row.8,
+            remote_blob_hash: row.6,
+            remote_revision: row.7,
+            sync_state: SkillSyncState::from_db_str(&row.8)?,
+            pinned: row.9,
         }))
     }
 
@@ -63,12 +65,14 @@ impl LocalStore {
     /// fully local and a managed workspace exists, so the record behaves
     /// like a synced mirror of the server skill.
     ///
-    /// Only a `remote_only` row may transition here. Pull apply is the sole
-    /// writer of that state, so the guarded update cannot clobber a local
-    /// edit that raced the hydration.
+    /// The manifest hash is part of the compare-and-swap predicate. Pull
+    /// apply is the other writer of `current_blob_hash`; if it wins the race
+    /// this update affects zero rows and hydration retries the newer head
+    /// instead of falsely marking an old workspace as synced.
     pub fn mark_skill_hydrated(
         &self,
         skill_id: &str,
+        expected_manifest_hash: &str,
         workspace_path: &std::path::Path,
     ) -> Result<LocalSkill, LocalStoreError> {
         let mut connection = self.lock_connection()?;
@@ -79,9 +83,11 @@ impl LocalStore {
             r#"
             UPDATE local_skills
             SET workspace_path = ?1, sync_state = 'synced', updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?2 AND sync_state = 'remote_only'
+            WHERE id = ?2
+              AND sync_state IN ('remote_only', 'synced')
+              AND current_blob_hash = ?3
             "#,
-            rusqlite::params![workspace_path, skill_id],
+            rusqlite::params![workspace_path, skill_id, expected_manifest_hash],
         )?;
         if changed == 0 {
             let existing: Option<String> = transaction
@@ -117,13 +123,13 @@ impl LocalStore {
             .query_row(
                 r#"
                 SELECT id, remote_id, name, slug, workspace_path, current_blob_hash,
-                       remote_revision, sync_state, pinned
+                       remote_blob_hash, remote_revision, sync_state, pinned
                 FROM local_skills
                 WHERE remote_id = ?1
                 "#,
                 [remote_id],
                 |row| {
-                    let sync_state: String = row.get(7)?;
+                    let sync_state: String = row.get(8)?;
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
@@ -131,9 +137,10 @@ impl LocalStore {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
-                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
                         sync_state,
-                        row.get::<_, bool>(8)?,
+                        row.get::<_, bool>(9)?,
                     ))
                 },
             )
@@ -149,9 +156,10 @@ impl LocalStore {
             slug: row.3,
             workspace_path: PathBuf::from(row.4),
             current_blob_hash: row.5,
-            remote_revision: row.6,
-            sync_state: SkillSyncState::from_db_str(&row.7)?,
-            pinned: row.8,
+            remote_blob_hash: row.6,
+            remote_revision: row.7,
+            sync_state: SkillSyncState::from_db_str(&row.8)?,
+            pinned: row.9,
         }))
     }
 }

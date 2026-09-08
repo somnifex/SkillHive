@@ -31,6 +31,7 @@ class DeviceRegisterRequest(SyncModel):
 class DeviceRead(SyncModel):
     protocol_version: Literal[1] = SYNC_PROTOCOL_VERSION
     device_id: UUID
+    user_id: UUID
     client_instance_id: UUID
     display_name: str
     platform: str

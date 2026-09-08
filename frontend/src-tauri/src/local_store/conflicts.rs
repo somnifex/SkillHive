@@ -9,8 +9,8 @@
 //!   never deleted by the worker);
 //! - the remote head revision (recorded on the mutation row via
 //!   `apply_mutation_outcome` / pull conflict paths);
-//! - the remote package hash (`local_skills.current_blob_hash` is updated
-//!   by pull; the local snapshot stays addressable in the blob store);
+//! - the remote package hash (`local_skills.remote_blob_hash`); the local
+//!   snapshot in `current_blob_hash` stays pinned until resolution;
 //! - the remote metadata needed for the choice (name/slug on
 //!   `local_skills`).
 //!
@@ -215,28 +215,26 @@ impl LocalStore {
 
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let skill = read_skill_for_resolution(&transaction, skill_id)?;
+        let _skill = read_skill_for_resolution(&transaction, skill_id)?;
 
         supersede_conflict_chain(&transaction, skill_id)?;
 
-        let sync_state = if skill.remote_revision.is_some() {
-            SkillSyncState::Synced
-        } else {
-            SkillSyncState::RemoteOnly
-        };
         transaction.execute(
             r#"
             UPDATE local_skills
-            SET sync_state = ?2, updated_at = CURRENT_TIMESTAMP
+            SET current_blob_hash = COALESCE(remote_blob_hash, current_blob_hash),
+                remote_blob_hash = NULL,
+                sync_state = 'remote_only',
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?1
             "#,
-            params![skill_id, sync_state_sync_string(sync_state)],
+            params![skill_id],
         )?;
 
         transaction.commit()?;
         Ok(ResolutionApplied {
             new_mutation_id: None,
-            skill_state: sync_state,
+            skill_state: SkillSyncState::RemoteOnly,
         })
     }
 }
@@ -303,19 +301,6 @@ fn supersede_conflict_chain(
         params![skill_id],
     )?;
     Ok(())
-}
-
-fn sync_state_sync_string(state: SkillSyncState) -> &'static str {
-    match state {
-        SkillSyncState::RemoteOnly => "remote_only",
-        SkillSyncState::Synced => "synced",
-        SkillSyncState::Dirty => "dirty",
-        SkillSyncState::Uploading => "uploading",
-        SkillSyncState::Conflict => "conflict",
-        SkillSyncState::SyncError => "sync_error",
-        SkillSyncState::AccessRevoked => "access_revoked",
-        SkillSyncState::Corrupted => "corrupted",
-    }
 }
 
 #[cfg(test)]
@@ -461,11 +446,11 @@ mod tests {
         commit_and_conflict(&store, "skill-1");
 
         let applied = store.resolve_keep_remote("skill-1", true).expect("resolve");
-        assert_eq!(applied.skill_state, SkillSyncState::Synced);
+        assert_eq!(applied.skill_state, SkillSyncState::RemoteOnly);
         assert_eq!(applied.new_mutation_id, None);
 
         let skill = store.get_skill("skill-1").expect("read").expect("skill");
-        assert_eq!(skill.sync_state, SkillSyncState::Synced);
+        assert_eq!(skill.sync_state, SkillSyncState::RemoteOnly);
         assert_eq!(skill.current_blob_hash, "sha256:local");
         assert!(store.list_dispatchable_mutations(10).expect("d").is_empty());
         assert!(store.list_conflicts().expect("list").is_empty());

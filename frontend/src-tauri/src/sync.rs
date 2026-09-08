@@ -58,6 +58,12 @@ pub enum SyncCycleError {
     /// login happens, without recording a server error.
     #[error("not signed in")]
     NotSignedIn,
+    /// Durable local rows/cursor are bound to another server or account.
+    /// This is a safety stop, not a mutation failure: no outbox row may be
+    /// sent until the user explicitly returns to the original scope or
+    /// clears/migrates the local store.
+    #[error("local sync scope mismatch: {0}")]
+    ScopeMismatch(String),
     /// Authentication/device failure (plan §15): distinct from mutation
     /// failure, never regenerates mutation IDs, stops the cycle.
     #[error("authentication/device failure: {0}")]
@@ -201,6 +207,9 @@ impl SyncEngine {
         // 1. Session: refresh before anything else so every later call can
         // reuse the fresh access token. A missing refresh credential means
         // the user never signed in — stop quietly.
+        store
+            .assert_server_scope(client.base_url())
+            .map_err(|error| SyncCycleError::ScopeMismatch(error.to_string()))?;
         if let Err(error) = client.ensure_access_token() {
             return Err(classify_session_failure(error));
         }
@@ -230,15 +239,29 @@ impl SyncEngine {
                 },
             ));
         }
-        if store.sync_state()?.device_id.as_deref() != Some(device.device_id.as_str()) {
-            store.record_device_registration(
+        let state = store.sync_state()?;
+        if state
+            .server_user_id
+            .as_deref()
+            .is_some_and(|user_id| user_id != device.user_id)
+        {
+            return Err(SyncCycleError::ScopeMismatch(
+                "authenticated user differs from the durable local scope".to_owned(),
+            ));
+        }
+        if state.device_id.as_deref() != Some(device.device_id.as_str())
+            || state.server_user_id.as_deref() != Some(device.user_id.as_str())
+            || state.server_url.as_deref() != Some(client.base_url())
+        {
+            store.record_authenticated_device(
+                client.base_url(),
+                state
+                    .server_login_identity
+                    .as_deref()
+                    .unwrap_or("sync-worker"),
                 &device.client_instance_id,
                 &device.device_id,
-                &store
-                    .sync_state()?
-                    .server_user_id
-                    .clone()
-                    .unwrap_or_default(),
+                &device.user_id,
             )?;
         }
 

@@ -1,6 +1,7 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from "axios";
 
 import { useAuthStore } from "../stores/auth";
+import { restoreDesktopSession } from "./desktopSession";
 import type { TokenResponse } from "../types";
 import { isDesktop, resolveApiBase, setStoredServerUrl } from "./server";
 
@@ -21,19 +22,22 @@ interface TauriGlobal {
  * the address is mirrored into the Rust-side config so the sync engine and
  * the webview talk to the same server; the web build just stores it locally.
  */
-export function setServerUrl(raw: string): void {
+export async function setServerUrl(raw: string): Promise<void> {
   const normalized = raw.trim().replace(/\/+$/, "");
-  setStoredServerUrl(normalized);
-  api.defaults.baseURL = resolveApiBase();
-  if (isDesktop() && normalized) {
+  const target = normalized || (isDesktop() ? "http://127.0.0.1:8000" : "");
+  if (isDesktop() && target) {
     const global = window as unknown as { __TAURI__?: TauriGlobal };
     const invoke = global.__TAURI__?.core?.invoke;
     if (invoke) {
-      void invoke("set_server_url", { request: { baseUrl: normalized } }).catch(
-        () => undefined,
-      );
+      // The Rust side rejects a server switch while local outbox/skills are
+      // bound to the old server.  Persist the WebView address only after
+      // that durable guard succeeds, otherwise browser calls and the Rust
+      // sync worker would point at different servers.
+      await invoke("set_server_url", { request: { baseUrl: target } });
     }
   }
+  setStoredServerUrl(normalized);
+  api.defaults.baseURL = resolveApiBase();
 }
 
 export function currentServerUrl(): string {
@@ -71,7 +75,20 @@ api.interceptors.response.use(
         useAuthStore.getState().setSession(data);
         return data.access_token;
       })
-      .catch(() => {
+      .catch(async () => {
+        // A Tauri reload/session restore intentionally does not copy the
+        // refresh token into the WebView cookie jar.  When that short-lived
+        // access token later expires, renew through Rust as well instead of
+        // signing the user out merely because the browser cookie is absent.
+        try {
+          const restored = await restoreDesktopSession();
+          if (restored) {
+            useAuthStore.getState().setSession(restored);
+            return restored.access_token;
+          }
+        } catch {
+          // Fall through to the signed-out state below.
+        }
         useAuthStore.getState().clearSession();
         return null;
       })

@@ -216,6 +216,7 @@ fn apply_acked(
         UPDATE local_skills
         SET remote_id = COALESCE(?2, remote_id),
             remote_revision = ?3,
+            remote_blob_hash = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?1
         "#,

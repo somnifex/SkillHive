@@ -18,6 +18,8 @@
 //! [`SyncClientError`] and never causes pending outbox mutation IDs to
 //! change (plan §15).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::{
@@ -82,6 +84,8 @@ impl From<CredentialStoreError> for SyncClientError {
 pub struct LoginResponse {
     pub access_token: String,
     pub expires_in: u64,
+    #[serde(default)]
+    pub user: serde_json::Value,
 }
 
 /// Server error envelope: `{"error": {"code", "message", "details"}}`.
@@ -112,6 +116,7 @@ pub struct DeviceRegistrationRequest {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRegistration {
     pub device_id: String,
+    pub user_id: String,
     pub client_instance_id: String,
     #[allow(dead_code)]
     pub display_name: String,
@@ -130,6 +135,17 @@ pub struct DeviceRegistration {
 pub struct SessionEstablished {
     pub device: DeviceRegistration,
     pub expires_in: u64,
+}
+
+/// Short-lived WebView session restored through the Rust credential boundary.
+/// The refresh token never crosses this IPC response; only the access token
+/// and the server's normal user projection are returned.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RestoredWebSession {
+    pub access_token: String,
+    pub expires_in: u64,
+    pub user: serde_json::Value,
 }
 
 impl DeviceRegistration {
@@ -154,6 +170,11 @@ pub struct SyncClient {
     /// cleared. The sync engine sets it once per cycle so all of a cycle's
     /// HTTP calls share one server-side correlation trail.
     correlation_id: std::sync::Mutex<Option<String>>,
+    /// Local kill switch for the current session.  Logout flips this before
+    /// network I/O, so a concurrent worker cycle cannot fetch or refresh a
+    /// credential after the user has left the desktop session.  Login flips
+    /// it back only after authentication and device registration succeed.
+    local_session_enabled: AtomicBool,
 }
 
 impl SyncClient {
@@ -168,6 +189,7 @@ impl SyncClient {
             credentials: CredentialStore::new(service_for_server(base_url)),
             http,
             correlation_id: std::sync::Mutex::new(None),
+            local_session_enabled: AtomicBool::new(true),
         })
     }
 
@@ -207,6 +229,10 @@ impl SyncClient {
         password: &str,
         registration: &DeviceRegistrationRequest,
     ) -> Result<SessionEstablished, SyncClientError> {
+        // A login attempt is a session transition.  Disable the old session
+        // before making any request; a failed account switch must not leave
+        // the old worker session running in the background.
+        self.local_session_enabled.store(false, Ordering::SeqCst);
         let response = self
             .http
             .post(format!("{}/api/v1/auth/login", self.base_url))
@@ -224,7 +250,17 @@ impl SyncClient {
             .map_err(|error| SyncClientError::Malformed(error.to_string()))?;
 
         self.store_refresh(&refresh_token)?;
-        let device = self.register_device_with(&login.access_token, registration)?;
+        let device = match self.register_device_with(&login.access_token, registration) {
+            Ok(device) => device,
+            Err(error) => {
+                // The refresh credential has already been stored at this
+                // point. Best-effort revoke/clear prevents a failed device
+                // registration from leaving a background-usable session.
+                let _ = self.logout();
+                return Err(error);
+            }
+        };
+        self.local_session_enabled.store(true, Ordering::SeqCst);
         Ok(SessionEstablished {
             device,
             expires_in: login.expires_in,
@@ -236,6 +272,27 @@ impl SyncClient {
     /// Called by the sync worker before each cycle; a failure here never
     /// touches outbox mutation state.
     pub fn ensure_access_token(&self) -> Result<String, SyncClientError> {
+        self.ensure_local_session_enabled()?;
+        Ok(self.refresh_session()?.access_token)
+    }
+
+    fn ensure_local_session_enabled(&self) -> Result<(), SyncClientError> {
+        if self.local_session_enabled.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(SyncClientError::NotSignedIn)
+        }
+    }
+
+    /// Pauses credential use while a desktop login attempt is in flight.
+    /// Unlike logout this does not revoke or delete the old session; a
+    /// successful login will replace it, while a failed account switch stays
+    /// stopped until the user explicitly logs in again.
+    pub fn suspend_local_session(&self) {
+        self.local_session_enabled.store(false, Ordering::SeqCst);
+    }
+
+    fn refresh_session(&self) -> Result<LoginResponse, SyncClientError> {
         let refresh = self.credentials.get_secret(ACCOUNT_REFRESH_TOKEN)?;
         let response = self
             .http
@@ -251,10 +308,9 @@ impl SyncClient {
         let rotated = extract_refresh_cookie(&response)?;
         self.store_refresh(&rotated)?;
 
-        let refreshed: LoginResponse = response
+        response
             .json()
-            .map_err(|error| SyncClientError::Malformed(error.to_string()))?;
-        Ok(refreshed.access_token)
+            .map_err(|error| SyncClientError::Malformed(error.to_string()))
     }
 
     /// Register (or re-register) the installation. Idempotent per
@@ -271,9 +327,91 @@ impl SyncClient {
 
     /// Remove stored secrets (logout). Idempotent.
     pub fn clear_credentials(&self) -> Result<(), SyncClientError> {
-        self.credentials.delete_secret(ACCOUNT_REFRESH_TOKEN)?;
-        self.credentials.delete_secret(ACCOUNT_ACCESS_TOKEN)?;
-        Ok(())
+        self.local_session_enabled.store(false, Ordering::SeqCst);
+        let mut first_error = None;
+        for account in [ACCOUNT_REFRESH_TOKEN, ACCOUNT_ACCESS_TOKEN] {
+            if let Err(error) = self.credentials.delete_secret(account) {
+                if first_error.is_none() {
+                    first_error = Some(SyncClientError::from(error));
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Attempts to revoke the refresh session on the server, then removes the
+    /// local credentials regardless of network/5xx outcome.  A local logout
+    /// must never leave an active keyring secret that a background worker can
+    /// continue using; revocation failure is returned for the UI to surface.
+    pub fn logout(&self) -> Result<(), SyncClientError> {
+        // Cut off the local credential path before attempting best-effort
+        // server revocation.  Even if the request hangs or the keyring
+        // refuses deletion, the worker cannot start another authenticated
+        // request through this client instance.
+        self.local_session_enabled.store(false, Ordering::SeqCst);
+        let refresh = match self.credentials.get_secret(ACCOUNT_REFRESH_TOKEN) {
+            Ok(value) => value,
+            Err(CredentialStoreError::NotFound { .. }) => {
+                return self.clear_credentials();
+            }
+            Err(error) => {
+                let mapped = SyncClientError::from(error);
+                let _ = self.clear_credentials();
+                return Err(mapped);
+            }
+        };
+        let mut request = self
+            .http
+            .post(format!("{}/api/v1/auth/logout", self.base_url))
+            .header(
+                reqwest::header::COOKIE,
+                format!("{}={}", REFRESH_COOKIE_NAME, refresh),
+            );
+        if let Some((name, value)) = self.correlation_header() {
+            request = request.header(name, value);
+        }
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(error) => {
+                let mapped = map_transport(error);
+                return match self.clear_credentials() {
+                    Ok(()) => Err(mapped),
+                    Err(clear_error) => Err(clear_error),
+                };
+            }
+        };
+        let status = response.status().as_u16();
+        if response.status().is_success() {
+            return self.clear_credentials();
+        }
+        let code = response
+            .json::<ErrorEnvelope>()
+            .ok()
+            .map(|envelope| envelope.error.code);
+        let error = classify_status(status, code);
+        if matches!(error, SyncClientError::Authentication { .. }) {
+            // The server has already rejected this refresh session; local
+            // deletion is still required even though revocation is moot.
+            return self.clear_credentials();
+        }
+        match self.clear_credentials() {
+            Ok(()) => Err(error),
+            Err(clear_error) => Err(clear_error),
+        }
+    }
+
+    /// Restores the normal WebView session after a reload using the refresh
+    /// credential held by Rust.  Only the short-lived access token crosses
+    /// the command boundary, and it is kept in the frontend's in-memory
+    /// auth store just like a normal login response.
+    pub fn restore_web_session(&self) -> Result<RestoredWebSession, SyncClientError> {
+        self.ensure_local_session_enabled()?;
+        let refreshed = self.refresh_session()?;
+        Ok(RestoredWebSession {
+            access_token: refreshed.access_token,
+            expires_in: refreshed.expires_in,
+            user: refreshed.user,
+        })
     }
 
     fn register_device_with(
@@ -476,6 +614,7 @@ mod tests {
         let body = serde_json::json!({
             "protocolVersion": 1,
             "deviceId": "11111111-1111-4111-8111-111111111111",
+            "userId": "22222222-2222-4222-8222-222222222222",
             "clientInstanceId": "00000000-0000-4000-8000-000000000000",
             "displayName": "Sync Desktop",
             "platform": "windows",
@@ -565,5 +704,20 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             assert_eq!(guard.as_ref().map(String::len), Some(128));
         }
+    }
+
+    #[test]
+    fn disabled_local_session_blocks_refresh_without_using_keyring() {
+        let client = SyncClient::new("http://127.0.0.1:1").expect("client");
+        client.suspend_local_session();
+
+        assert!(matches!(
+            client.ensure_access_token(),
+            Err(SyncClientError::NotSignedIn)
+        ));
+        assert!(matches!(
+            client.restore_web_session(),
+            Err(SyncClientError::NotSignedIn)
+        ));
     }
 }

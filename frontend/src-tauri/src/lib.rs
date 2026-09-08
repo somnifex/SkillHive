@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use skill_snapshot::{capture_workspace, SkillSnapshotRef, SnapshotPolicy};
 use snapshot_verifier::verify_materialized_snapshot;
 use sync::{SyncCycleReport, SyncEngine};
-use sync_client::{DeviceRegistrationRequest, SyncClient};
+use sync_client::{DeviceRegistrationRequest, RestoredWebSession, SyncClient};
 use sync_worker::{spawn_sync_worker, SyncWorkerHandle};
 use tauri::Manager;
 use uninstall::{UninstallEngine, UninstallRequest};
@@ -885,6 +885,7 @@ pub struct DesktopLoginResult {
 
 #[tauri::command]
 fn desktop_login(
+    app: tauri::AppHandle,
     coordinator: tauri::State<'_, DesktopMutationCoordinator>,
     client: tauri::State<'_, SyncClientHandle>,
     store: tauri::State<'_, LocalStore>,
@@ -895,6 +896,26 @@ fn desktop_login(
         .lock()
         .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
 
+    let server_url = server_config::normalize_server_url(&request.base_url)
+        .map_err(|error| error.to_string())?;
+    store
+        .prepare_login_scope(&server_url, &request.username)
+        .map_err(|error| error.to_string())?;
+    // Authenticate against a temporary client first.  Replacing the shared
+    // worker client before login succeeded could strand the old credential or
+    // let a failed account switch resume under the wrong identity.
+    let current_client = client.get();
+    // The durable scope is now pending.  Pause the old client's credential
+    // path before any fallible setup/login step so a failed switch cannot
+    // leave the previous account running in the background.
+    current_client.suspend_local_session();
+    let mut replacement = if current_client.base_url() != server_url {
+        Some(SyncClient::new(&server_url).map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+    let login_client = replacement.as_ref().unwrap_or(&current_client);
+
     let registration = DeviceRegistrationRequest {
         protocol_version: 1,
         client_instance_id: store
@@ -904,20 +925,37 @@ fn desktop_login(
         platform: std::env::consts::OS.to_owned(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
     };
-    let session = client
-        .get()
+    let session = login_client
         .login(&request.username, &request.password, &registration)
         .map_err(|error| error.to_string())?;
-    store
-        .record_device_registration(
-            &session.device.client_instance_id,
-            &session.device.device_id,
-            // server_user_id is not part of the login payload; the device
-            // registration response is scoped to the authenticated user, so
-            // record the display identity from the device row.
-            &session.device.client_instance_id,
-        )
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = store.record_authenticated_device(
+        &server_url,
+        &request.username,
+        &session.device.client_instance_id,
+        &session.device.device_id,
+        &session.device.user_id,
+    ) {
+        // A server response that does not match the durable local scope must
+        // not leave a fresh refresh session active. Revoke it best-effort;
+        // local logout semantics clear the credential even if the server is
+        // unavailable, while the scope guard also blocks the worker.
+        let _ = login_client.logout();
+        return Err(error.to_string());
+    }
+    let data_dir = match app.path().app_local_data_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = login_client.logout();
+            return Err(error.to_string());
+        }
+    };
+    if let Err(error) = server_config::store(&data_dir, &server_url) {
+        let _ = login_client.logout();
+        return Err(error.to_string());
+    }
+    if let Some(new_client) = replacement.take() {
+        client.replace(new_client);
+    }
     Ok(DesktopLoginResult {
         device_id: session.device.device_id,
         client_instance_id: session.device.client_instance_id,
@@ -929,14 +967,34 @@ fn desktop_login(
 fn desktop_logout(
     coordinator: tauri::State<'_, DesktopMutationCoordinator>,
     client: tauri::State<'_, SyncClientHandle>,
+    store: tauri::State<'_, LocalStore>,
 ) -> Result<(), String> {
     let _guard = coordinator
         .lock
         .lock()
         .map_err(|_| "desktop mutation coordinator lock poisoned".to_owned())?;
+    // Invalidate the durable scope before network I/O so an in-flight or
+    // subsequently woken worker cannot use the old identity. The client then
+    // attempts server revocation and clears the local credential even when
+    // the server is down; either error remains visible to the caller.
+    let scope_result = store.invalidate_authenticated_scope();
+    let logout_result = client.get().logout();
+    match (scope_result, logout_result) {
+        (Err(scope), _) => Err(scope.to_string()),
+        (_, Err(logout)) => Err(logout.to_string()),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+/// Restores the WebView's short-lived access session after a reload.  The
+/// refresh credential remains inside the Rust OS credential boundary.
+#[tauri::command]
+fn desktop_restore_session(
+    client: tauri::State<'_, SyncClientHandle>,
+) -> Result<RestoredWebSession, String> {
     client
         .get()
-        .clear_credentials()
+        .restore_web_session()
         .map_err(|error| error.to_string())
 }
 
@@ -963,14 +1021,19 @@ fn get_server_url(client: tauri::State<'_, SyncClientHandle>) -> ServerUrlState 
 fn set_server_url(
     app: tauri::AppHandle,
     handle: tauri::State<'_, SyncClientHandle>,
+    store: tauri::State<'_, LocalStore>,
     request: ServerUrlUpdate,
 ) -> Result<ServerUrlState, String> {
     let data_dir = app
         .path()
         .app_local_data_dir()
         .map_err(|error| error.to_string())?;
-    let normalized =
-        server_config::store(&data_dir, &request.base_url).map_err(|error| error.to_string())?;
+    let normalized = server_config::normalize_server_url(&request.base_url)
+        .map_err(|error| error.to_string())?;
+    store
+        .prepare_server_switch(&normalized)
+        .map_err(|error| error.to_string())?;
+    server_config::store(&data_dir, &normalized).map_err(|error| error.to_string())?;
     let client = SyncClient::new(&normalized).map_err(|error| error.to_string())?;
     handle.replace(client);
     // The worker resolves the handle per cycle; poke it so a queued retry
@@ -1391,6 +1454,7 @@ pub fn run() {
             desktop_startup_status,
             desktop_login,
             desktop_logout,
+            desktop_restore_session,
             get_server_url,
             set_server_url,
             sync_now,

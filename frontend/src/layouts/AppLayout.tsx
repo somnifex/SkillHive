@@ -13,11 +13,11 @@ import {
   Sun,
   Users,
 } from "lucide-react";
-import { Avatar, Button, Drawer, Dropdown, Layout } from "antd";
+import { App, Avatar, Button, Drawer, Dropdown, Layout } from "antd";
 import { useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api, errorMessage } from "../api/client";
 import { isDesktop } from "../api/server";
 import { desktopLogout } from "../api/desktop";
 import { BrandLogo } from "../components/BrandLogo";
@@ -52,6 +52,7 @@ const routeTitles: Record<string, string> = {
 export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { message } = App.useApp();
   const user = useAuthStore((state) => state.user);
   const clearSession = useAuthStore((state) => state.clearSession);
   const dark = useAppearanceStore((state) => state.dark);
@@ -69,14 +70,23 @@ export function AppLayout() {
   };
 
   const logout = async () => {
+    let warning: string | null = null;
     try {
       await api.post("/auth/logout");
-    } finally {
-      if (isDesktop()) {
-        await desktopLogout().catch(() => undefined);
+    } catch (error) {
+      warning = errorMessage(error);
+    }
+    if (isDesktop()) {
+      try {
+        await desktopLogout();
+      } catch (error) {
+        warning = error instanceof Error ? error.message : "本机会话撤销失败";
       }
-      clearSession();
-      navigate("/login");
+    }
+    clearSession();
+    navigate("/login");
+    if (warning) {
+      message.warning(`已退出当前页面，但服务端会话撤销需要重试：${warning}`);
     }
   };
 

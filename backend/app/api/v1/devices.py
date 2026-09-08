@@ -96,6 +96,7 @@ def revoke_device(device_id: str, user: CurrentUser, session: DBSession) -> None
 def _read_device(device: Device) -> DeviceRead:
     return DeviceRead(
         device_id=device.id,
+        user_id=device.user_id,
         client_instance_id=device.client_instance_id,
         display_name=device.display_name,
         platform=device.platform,

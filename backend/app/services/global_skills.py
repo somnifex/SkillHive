@@ -1,11 +1,11 @@
 from math import ceil
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
 from app.db.base import utc_now
-from app.models import GroupSkillGrant, Skill, SkillVersion, User
+from app.models import GroupSkillGrant, Skill, User
 from app.repositories.skills import SkillRepository
 from app.schemas.common import Page
 from app.schemas.skill import (
@@ -60,6 +60,7 @@ class GlobalSkillService:
         )
 
     def create(self, data: GlobalSkillCreate) -> SkillRead:
+        self._begin_global_write()
         duplicate = self.session.scalar(
             select(Skill.id).where(
                 Skill.skill_type == "global",
@@ -94,7 +95,8 @@ class GlobalSkillService:
         return self._read(self._global(skill_id))
 
     def update(self, skill_id: str, data: GlobalSkillUpdate) -> SkillRead:
-        skill = self._global(skill_id)
+        self._begin_global_write()
+        skill = self._global_for_write(skill_id)
         updates = data.model_dump(exclude_unset=True, exclude={"content", "version", "change_log"})
         content = data.content.model_dump(mode="json") if data.content is not None else None
         self.mutations.update_skill(
@@ -111,7 +113,8 @@ class GlobalSkillService:
         return self._read(skill)
 
     def create_version(self, skill_id: str, data: SkillVersionCreate) -> SkillVersionRead:
-        skill = self._global(skill_id)
+        self._begin_global_write()
+        skill = self._global_for_write(skill_id)
         version = self.mutations.create_version(
             skill,
             version=data.version,
@@ -127,14 +130,10 @@ class GlobalSkillService:
         return SkillVersionRead.model_validate(version)
 
     def publish(self, skill_id: str, version_id: str | None) -> SkillRead:
-        skill = self._global(skill_id)
+        self._begin_global_write()
+        skill = self._global_for_write(skill_id)
         selected_id = version_id or skill.current_version_id
-        version = self.session.scalar(
-            select(SkillVersion).where(
-                SkillVersion.id == selected_id,
-                SkillVersion.skill_id == skill.id,
-            )
-        )
+        version = self.repository.version_for_update(selected_id, skill.id)
         if version is None:
             raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
         self.mutations.publish_version(
@@ -146,7 +145,8 @@ class GlobalSkillService:
         return self._read(skill)
 
     def set_status(self, skill_id: str, status: str) -> SkillRead:
-        skill = self._global(skill_id)
+        self._begin_global_write()
+        skill = self._global_for_write(skill_id)
         self.mutations.set_status(
             skill,
             status,
@@ -202,6 +202,19 @@ class GlobalSkillService:
         if skill is None:
             raise AppError("SKILL_NOT_FOUND", "Global skill was not found.", 404)
         return skill
+
+    def _global_for_write(self, skill_id: str) -> Skill:
+        skill = self.repository.global_for_update(skill_id)
+        if skill is None:
+            raise AppError("SKILL_NOT_FOUND", "Global skill was not found.", 404)
+        return skill
+
+    def _begin_global_write(self) -> None:
+        """Serialize revision/version mutations on SQLite and PostgreSQL."""
+        bind = self.session.get_bind()
+        if bind.dialect.name == "sqlite":
+            self.session.rollback()
+            self.session.execute(text("BEGIN IMMEDIATE"))
 
     def _read(self, skill: Skill, *, include_version: bool = True) -> SkillRead:
         result = SkillRead.model_validate(skill)

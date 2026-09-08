@@ -12,6 +12,8 @@ use serde::Deserialize;
 use super::entitlements::EntitlementPayload;
 use super::{LocalStore, LocalStoreError};
 
+type ExistingSkillHead = (String, String, String, Option<String>, Option<i64>);
+
 /// One decoded `SyncChangeItem` from the pull feed (camelCase on the wire).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,45 +118,91 @@ fn apply_upsert(
     let slug = metadata_string(change, "slug");
     let workspace_path = format!("{}\\{}", std::env::temp_dir().display(), change.resource_id);
 
-    let existing: Option<(String, String)> = transaction
+    let existing: Option<ExistingSkillHead> = transaction
         .query_row(
-            "SELECT id, sync_state FROM local_skills WHERE id = ?1 OR remote_id = ?1",
+            "SELECT id, sync_state, current_blob_hash, remote_blob_hash, remote_revision
+             FROM local_skills WHERE id = ?1 OR remote_id = ?1",
             params![change.resource_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()?;
-    let (local_key, existing_state) = existing
-        .map(|(id, state)| (Some(id), Some(state)))
-        .unwrap_or((None, None));
+    let (local_key, existing_state, local_blob_hash, _remote_blob_hash, existing_revision) =
+        existing
+            .map(|(id, state, local_hash, remote_hash, revision)| {
+                (
+                    Some(id),
+                    Some(state),
+                    Some(local_hash),
+                    remote_hash,
+                    revision,
+                )
+            })
+            .unwrap_or((None, None, None, None, None));
+
+    // Pull pages are cursor ordered, but a retried/stale page must not move
+    // a local mirror backwards.  This also makes hydration's hash CAS
+    // meaningful when an old page races a newer one.
+    if existing_revision.is_some_and(|revision| revision >= change.resource_revision) {
+        return Ok(0);
+    }
 
     let conflict = matches!(
         existing_state.as_deref(),
         Some("dirty") | Some("conflict") | Some("uploading")
     );
 
+    let incoming_hash = change.package_manifest_hash.as_deref();
+    let hash_changed = incoming_hash.is_some_and(|hash| {
+        local_blob_hash
+            .as_deref()
+            .is_some_and(|current| !current.is_empty() && current != hash)
+    });
     let sync_state = if existing_state.is_none() {
         // Remote-only: metadata known, bytes not cached.
         "remote_only"
     } else if conflict {
         "conflict"
+    } else if hash_changed {
+        // The previous workspace is a materialization of the old immutable
+        // snapshot.  Mark it remote-only so hydration/deploy must rebuild it
+        // from the new hash instead of trusting an existing directory.
+        "remote_only"
     } else {
         "synced"
     };
+
+    // Dirty/conflict rows retain current_blob_hash as the local snapshot.
+    // The remote package is recorded separately so keep-remote can adopt it
+    // later without destroying the user's local immutable content.
+    let next_current_hash = if conflict { None } else { incoming_hash };
+    let preserve_local_metadata = conflict;
 
     let inserted = transaction.execute(
         r#"
         INSERT INTO local_skills(
             id, remote_id, name, slug, workspace_path, current_blob_hash,
-            remote_revision, sync_state, pinned, updated_at
-        ) VALUES (?1, ?1, COALESCE(?2, ?1), COALESCE(?3, ?1), ?4, COALESCE(?5, ''),
-                  ?6, ?7, 0, CURRENT_TIMESTAMP)
+            remote_blob_hash, remote_revision, sync_state, pinned, updated_at
+        ) VALUES (?1, ?1, COALESCE(?2, ?1), COALESCE(?3, ?1), ?4,
+                  COALESCE(?5, ''), ?6, ?7, ?8, 0, CURRENT_TIMESTAMP)
         ON CONFLICT(id) DO UPDATE SET
             remote_id = COALESCE(local_skills.remote_id, excluded.remote_id),
-            remote_revision = ?6,
-            current_blob_hash = COALESCE(?5, local_skills.current_blob_hash),
-            name = COALESCE(?2, local_skills.name),
-            slug = COALESCE(?3, local_skills.slug),
-            sync_state = ?7,
+            remote_revision = ?7,
+            remote_blob_hash = COALESCE(?6, local_skills.remote_blob_hash),
+            current_blob_hash = CASE
+                WHEN ?9 = 1 THEN local_skills.current_blob_hash
+                ELSE COALESCE(?6, local_skills.current_blob_hash)
+            END,
+            name = CASE WHEN ?9 = 1 THEN local_skills.name ELSE COALESCE(?2, local_skills.name) END,
+            slug = CASE WHEN ?9 = 1 THEN local_skills.slug ELSE COALESCE(?3, local_skills.slug) END,
+            sync_state = ?8,
             updated_at = CURRENT_TIMESTAMP
         "#,
         params![
@@ -162,9 +210,11 @@ fn apply_upsert(
             name,
             slug,
             workspace_path,
-            change.package_manifest_hash,
+            next_current_hash,
+            incoming_hash,
             change.resource_revision,
             sync_state,
+            i64::from(preserve_local_metadata),
         ],
     )?;
 
@@ -181,18 +231,21 @@ fn apply_tombstone(
     // The local row may be keyed by the client-generated ID (a pushed
     // create carries the server ID only in `remote_id`), so resolve the
     // key the same way apply_upsert does.
-    let local_key: Option<String> = transaction
+    let local: Option<(String, Option<i64>)> = transaction
         .query_row(
-            "SELECT id FROM local_skills WHERE id = ?1 OR remote_id = ?1",
+            "SELECT id, remote_revision FROM local_skills WHERE id = ?1 OR remote_id = ?1",
             params![change.resource_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
 
-    let Some(local_key) = local_key else {
+    let Some((local_key, existing_revision)) = local else {
         // Unknown resource: nothing cached, nothing to remove.
         return Ok(());
     };
+    if existing_revision.is_some_and(|revision| revision >= change.resource_revision) {
+        return Ok(());
+    }
 
     let dirty: bool = transaction
         .query_row(
@@ -363,6 +416,22 @@ mod tests {
     }
 
     #[test]
+    fn stale_tombstone_cannot_delete_a_newer_remote_head() {
+        let (_temp, store) = open_temp_store();
+        store
+            .apply_changes_page(&page(vec![upsert("remote-stale", 2)], "v1.AAAAAg"))
+            .expect("newer upsert");
+        store
+            .apply_changes_page(&page(vec![tombstone("remote-stale", 1)], "v1.AAAAAg"))
+            .expect("stale tombstone");
+        let skill = store
+            .get_skill("remote-stale")
+            .expect("read")
+            .expect("skill remains");
+        assert_eq!(skill.remote_revision, Some(2));
+    }
+
+    #[test]
     fn tombstone_with_pending_mutation_preserves_work_as_conflict() {
         let (_temp, store) = open_temp_store();
         store
@@ -397,7 +466,7 @@ mod tests {
             let connection = store.lock_connection().expect("conn");
             connection
                 .execute(
-                    "UPDATE local_skills SET sync_state = 'dirty' WHERE id = 'remote-5'",
+                    "UPDATE local_skills SET current_blob_hash = 'sha256:local', sync_state = 'dirty' WHERE id = 'remote-5'",
                     [],
                 )
                 .expect("dirty");
@@ -410,6 +479,8 @@ mod tests {
         let skill = store.get_skill("remote-5").expect("read").expect("skill");
         assert_eq!(skill.sync_state, SkillSyncState::Conflict);
         assert_eq!(skill.remote_revision, Some(5));
+        assert_eq!(skill.current_blob_hash, "sha256:local");
+        assert_eq!(skill.remote_blob_hash.as_deref(), Some("sha256:abc"));
     }
 
     #[test]
@@ -460,7 +531,7 @@ mod tests {
             .expect("skill");
         assert_eq!(skill.remote_id.as_deref(), Some("srv-9"));
         assert_eq!(skill.remote_revision, Some(2));
-        assert_eq!(skill.sync_state, SkillSyncState::Synced);
+        assert_eq!(skill.sync_state, SkillSyncState::RemoteOnly);
         assert!(store.get_skill("srv-9").expect("read").is_none());
     }
 

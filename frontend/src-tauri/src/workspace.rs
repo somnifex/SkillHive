@@ -122,6 +122,68 @@ impl WorkspaceStore {
         })
     }
 
+    /// Atomically replaces an existing managed workspace with a verified
+    /// immutable snapshot.  This is used when a pull observes a newer remote
+    /// manifest while the old workspace is still present.  The snapshot is
+    /// fully materialized in a sibling staging directory before the old
+    /// directory is moved aside, so a failed activation can restore the old
+    /// workspace and a crash can never expose a mixed tree.
+    pub fn replace_snapshot(
+        &self,
+        blobs: &BlobStore,
+        skill_id: &str,
+        snapshot_hash: &str,
+    ) -> Result<WorkspaceRef, WorkspaceError> {
+        validate_skill_id(skill_id)?;
+        let path = self.path_for_skill(skill_id)?;
+        let staging = self
+            .root
+            .join(format!(".skillhive-stage-{}", Uuid::new_v4()));
+        let backup = self
+            .root
+            .join(format!(".skillhive-backup-{}", Uuid::new_v4()));
+
+        let result = (|| -> Result<WorkspaceRef, WorkspaceError> {
+            materialize_snapshot(blobs, snapshot_hash, &staging)?;
+            sync_directory(&self.root)?;
+
+            let had_old = match fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(WorkspaceError::InvalidWorkspace(path.clone()));
+                    }
+                    fs::rename(&path, &backup)?;
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(WorkspaceError::Io(error)),
+            };
+
+            if let Err(error) = fs::rename(&staging, &path) {
+                if had_old {
+                    let _ = fs::rename(&backup, &path);
+                }
+                return Err(WorkspaceError::Io(error));
+            }
+            sync_directory(&self.root)?;
+            if had_old {
+                // Cleanup is deliberately best effort: the new verified
+                // workspace is active, and a leftover backup is recoverable
+                // rather than a reason to report a failed hydration.
+                let _ = remove_tree_without_following_symlinks(&backup);
+            }
+            Ok(WorkspaceRef {
+                skill_id: skill_id.to_owned(),
+                path,
+            })
+        })();
+
+        if result.is_err() {
+            let _ = remove_tree_without_following_symlinks(&staging);
+        }
+        result
+    }
+
     pub fn get(&self, skill_id: &str) -> Result<Option<WorkspaceRef>, WorkspaceError> {
         let path = self.path_for_skill(skill_id)?;
         match fs::symlink_metadata(&path) {

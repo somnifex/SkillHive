@@ -121,51 +121,93 @@ pub fn hydrate_skill(
     workspaces: &WorkspaceStore,
     skill_id: &str,
 ) -> Result<HydrationOutcome, HydrationError> {
-    let skill = store
-        .get_skill(skill_id)?
-        .ok_or_else(|| LocalStoreError::SkillNotFound(skill_id.to_owned()))?;
-    let manifest_hash = skill.current_blob_hash.clone();
-
-    if let Some(workspace) = workspaces.get(skill_id)? {
-        // Workspace already exists: never touch it, just re-verify it.
-        verify_materialized_snapshot(blobs, &manifest_hash, &workspace.path)?;
-        if matches!(skill.sync_state, SkillSyncState::RemoteOnly) {
-            store.mark_skill_hydrated(skill_id, &workspace.path)?;
+    // Pull and hydration share the SQLite mutex, but filesystem materializing
+    // intentionally happens outside the DB transaction.  Retry a bounded
+    // number of times when pull wins the hash CAS so a newer remote head is
+    // materialized instead of being hidden behind an apparently synced row.
+    for _attempt in 0..3 {
+        let skill = store
+            .get_skill(skill_id)?
+            .ok_or_else(|| LocalStoreError::SkillNotFound(skill_id.to_owned()))?;
+        if !matches!(
+            skill.sync_state,
+            SkillSyncState::RemoteOnly | SkillSyncState::Synced
+        ) {
+            return Err(HydrationError::LocalStore(LocalStoreError::InvalidInput(
+                format!(
+                    "skill {skill_id} in state {:?} cannot be hydrated",
+                    skill.sync_state
+                ),
+            )));
         }
-        return Ok(HydrationOutcome {
-            skill_id: skill.id,
-            manifest_hash,
-            blobs_downloaded: 0,
-            workspace_created: false,
-            workspace_path: workspace.path,
+        let manifest_hash = skill.current_blob_hash.clone();
+
+        let existing_workspace = workspaces.get(skill_id)?;
+        let workspace_was_missing = existing_workspace.is_none();
+        let workspace_is_current = existing_workspace.as_ref().is_some_and(|workspace| {
+            verify_materialized_snapshot(blobs, &manifest_hash, &workspace.path).is_ok()
         });
+
+        if workspace_is_current && matches!(skill.sync_state, SkillSyncState::Synced) {
+            let workspace = existing_workspace.expect("workspace checked above");
+            return Ok(HydrationOutcome {
+                skill_id: skill.id,
+                manifest_hash,
+                blobs_downloaded: 0,
+                workspace_created: false,
+                workspace_path: workspace.path,
+            });
+        }
+
+        let blobs_downloaded = ensure_closure_local(client, blobs, &manifest_hash)?;
+        let workspace = if workspace_is_current {
+            existing_workspace.expect("workspace checked above")
+        } else if existing_workspace.is_some() {
+            // A remote upsert may leave the old managed directory in place.
+            // Replace it only after the new immutable closure is local and
+            // verified; never hand the old directory to deploy as new state.
+            workspaces.replace_snapshot(blobs, skill_id, &manifest_hash)?
+        } else {
+            workspaces.import_snapshot(blobs, skill_id, &manifest_hash)?
+        };
+
+        match store.mark_skill_hydrated(skill_id, &manifest_hash, &workspace.path) {
+            Ok(_) => {
+                return Ok(HydrationOutcome {
+                    skill_id: skill.id,
+                    manifest_hash,
+                    blobs_downloaded,
+                    workspace_created: workspace_was_missing,
+                    workspace_path: workspace.path,
+                });
+            }
+            Err(LocalStoreError::InvalidInput(message))
+                if message.contains("cannot be hydrated") =>
+            {
+                // A pull changed the remote hash/state after materialization.
+                // The next iteration reads the new head and repairs the
+                // workspace. Other invalid states remain fail-closed.
+                let latest = store.get_skill(skill_id)?;
+                if latest.as_ref().is_some_and(|current| {
+                    matches!(
+                        current.sync_state,
+                        SkillSyncState::RemoteOnly | SkillSyncState::Synced
+                    ) && current.current_blob_hash != manifest_hash
+                }) {
+                    continue;
+                }
+                return Err(HydrationError::LocalStore(LocalStoreError::InvalidInput(
+                    message,
+                )));
+            }
+            Err(error) => return Err(HydrationError::LocalStore(error)),
+        }
     }
 
-    if !matches!(
-        skill.sync_state,
-        SkillSyncState::RemoteOnly | SkillSyncState::Synced
-    ) {
-        return Err(HydrationError::LocalStore(LocalStoreError::InvalidInput(
-            format!(
-                "skill {skill_id} in state {:?} without a workspace cannot be hydrated",
-                skill.sync_state
-            ),
-        )));
-    }
-
-    let blobs_downloaded = ensure_closure_local(client, blobs, &manifest_hash)?;
-    let workspace = workspaces.import_snapshot(blobs, skill_id, &manifest_hash)?;
-    if matches!(skill.sync_state, SkillSyncState::RemoteOnly) {
-        store.mark_skill_hydrated(skill_id, &workspace.path)?;
-    }
-
-    Ok(HydrationOutcome {
-        skill_id: skill.id,
-        manifest_hash,
-        blobs_downloaded,
-        workspace_created: true,
-        workspace_path: workspace.path,
-    })
+    Err(HydrationError::InvalidState(
+        skill_id.to_owned(),
+        "remote head changed repeatedly during hydration".to_owned(),
+    ))
 }
 
 #[cfg(test)]
@@ -247,6 +289,99 @@ mod tests {
         let entrypoint = outcome.workspace_path.join("SKILL.md");
         let content = std::fs::read_to_string(&entrypoint).expect("read entrypoint");
         assert!(content.contains("materialized from the server"));
+    }
+
+    #[test]
+    fn remote_second_update_replaces_an_existing_old_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blobs =
+            crate::blob_store::BlobStore::open(temp.path().join("blobs")).expect("blob store");
+        let workspaces =
+            WorkspaceStore::open(temp.path().join("workspaces")).expect("workspace store");
+        let store = LocalStore::open(temp.path().join("skillhive.db")).expect("store");
+
+        let (_source, first_hash, _) = captured_snapshot(&blobs);
+        apply_pulled_skill(&store, "remote-update", &first_hash);
+        hydrate_skill(
+            &offline_client(),
+            &store,
+            &blobs,
+            &workspaces,
+            "remote-update",
+        )
+        .expect("first hydrate");
+
+        let second_source = tempfile::tempdir().expect("second source");
+        std::fs::write(
+            second_source.path().join("SKILL.md"),
+            "# Hydrated Skill\n\nsecond remote revision\n",
+        )
+        .expect("write second skill");
+        let second = capture_workspace(
+            &blobs,
+            second_source.path(),
+            crate::skill_snapshot::SnapshotPolicy::default(),
+        )
+        .expect("second snapshot");
+
+        store
+            .apply_changes_page(&ChangesPage {
+                protocol_version: 1,
+                changes: vec![ChangeItem {
+                    sequence: 2,
+                    resource_type: "skill".to_owned(),
+                    resource_id: "remote-update".to_owned(),
+                    resource_revision: 2,
+                    operation: "upsert".to_owned(),
+                    package_manifest_hash: Some(second.manifest_hash.clone()),
+                    metadata: json!({"name": "Pulled Skill", "slug": "pulled-skill"}),
+                }],
+                next_cursor: "v1.AAAAAg".to_owned(),
+                has_more: false,
+            })
+            .expect("second pull");
+        assert_eq!(
+            store
+                .get_skill("remote-update")
+                .expect("read")
+                .expect("skill")
+                .sync_state,
+            SkillSyncState::RemoteOnly
+        );
+        assert!(store
+            .mark_skill_hydrated(
+                "remote-update",
+                &first_hash,
+                &outcome_path(&workspaces, "remote-update")
+            )
+            .is_err());
+
+        let outcome = hydrate_skill(
+            &offline_client(),
+            &store,
+            &blobs,
+            &workspaces,
+            "remote-update",
+        )
+        .expect("rehydrate");
+        assert!(!outcome.workspace_created);
+        let content = std::fs::read_to_string(outcome.workspace_path.join("SKILL.md"))
+            .expect("read replaced workspace");
+        assert!(content.contains("second remote revision"));
+        assert_eq!(
+            store
+                .get_skill("remote-update")
+                .expect("read")
+                .expect("skill")
+                .sync_state,
+            SkillSyncState::Synced
+        );
+    }
+
+    fn outcome_path(workspaces: &WorkspaceStore, skill_id: &str) -> std::path::PathBuf {
+        workspaces
+            .path_for_skill(skill_id)
+            .expect("managed workspace path")
     }
 
     #[test]

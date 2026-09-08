@@ -95,7 +95,7 @@ function ServerAddressField() {
   const test = async () => {
     setTesting(true);
     try {
-      setServerUrl(value);
+      await setServerUrl(value);
       await pingServer(value);
       const target = normalizeServerUrl(value);
       message.success(target ? `已连接：${target}` : "已连接到同源部署");
@@ -116,7 +116,9 @@ function ServerAddressField() {
           value={value}
           placeholder={isDesktop() ? "http://127.0.0.1:8000" : "同源部署（可留空）"}
           onChange={(event) => setValue(event.target.value)}
-          onBlur={() => setServerUrl(value)}
+          onBlur={() => {
+            void setServerUrl(value).catch(() => undefined);
+          }}
           prefix={<Server size={17} strokeWidth={1.7} aria-hidden="true" />}
           autoComplete="url"
         />

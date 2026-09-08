@@ -126,6 +126,8 @@ export interface DesktopSyncState {
   protocolVersion: number;
   deviceId: string | null;
   serverUserId: string | null;
+  serverUrl?: string | null;
+  serverLoginIdentity?: string | null;
   serverCursor: string | null;
   lastSuccessfulPushAt: string | null;
   lastSuccessfulPullAt: string | null;
@@ -308,7 +310,7 @@ export async function desktopLogin(input: {
   return (await pending) as DesktopLoginResult;
 }
 
-/** Clears the keyring credentials of the sync device (best effort). */
+/** Revokes and clears the desktop refresh session; failures are surfaced. */
 export async function desktopLogout(): Promise<void> {
   const pending = tauriInvoke("desktop_logout", {});
   if (pending === null) return;

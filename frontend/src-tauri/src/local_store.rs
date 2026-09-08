@@ -179,6 +179,10 @@ pub struct LocalSkill {
     pub slug: String,
     pub workspace_path: PathBuf,
     pub current_blob_hash: String,
+    /// Remote head package hash.  During a conflict this is intentionally
+    /// different from `current_blob_hash`, which remains the local immutable
+    /// snapshot until the user resolves the conflict.
+    pub remote_blob_hash: Option<String>,
     pub remote_revision: Option<i64>,
     pub sync_state: SkillSyncState,
     pub pinned: bool,
@@ -210,6 +214,8 @@ pub struct LocalSyncState {
     pub client_instance_id: Option<String>,
     pub device_id: Option<String>,
     pub server_user_id: Option<String>,
+    pub server_url: Option<String>,
+    pub server_login_identity: Option<String>,
     pub server_cursor: Option<String>,
     pub last_successful_push_at: Option<String>,
     pub last_successful_pull_at: Option<String>,
@@ -491,5 +497,126 @@ mod migration_safety_tests {
             !db_path.with_extension("sqlite3.pre-migration").exists(),
             "no backup on a fresh install"
         );
+    }
+
+    #[test]
+    fn populated_v5_scope_is_adopted_only_after_authenticated_user_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("legacy-v5.db");
+        {
+            let mut connection = Connection::open(&db_path).expect("open");
+            connection
+                .execute_batch(
+                    "CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY NOT NULL,
+                        applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );",
+                )
+                .expect("schema migrations");
+            for (version, sql) in migrations::MIGRATIONS.iter().take(5) {
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .expect("migration tx");
+                transaction.execute_batch(sql).expect("migration");
+                transaction
+                    .execute(
+                        "INSERT INTO schema_migrations(version) VALUES (?1)",
+                        [version],
+                    )
+                    .expect("migration stamp");
+                transaction.commit().expect("migration commit");
+            }
+            connection
+                .execute(
+                    "INSERT INTO local_skills(
+                        id, name, slug, workspace_path, current_blob_hash, sync_state
+                    ) VALUES ('legacy-skill', 'Legacy', 'legacy', 'C:\\legacy',
+                              'sha256:legacy', 'dirty')",
+                    [],
+                )
+                .expect("legacy skill");
+            connection
+                .execute(
+                    "INSERT INTO local_mutations(
+                        id, skill_id, local_sequence, operation, payload_hash, state
+                    ) VALUES ('legacy-mutation', 'legacy-skill', 1, 'update',
+                              'sha256:legacy', 'pending')",
+                    [],
+                )
+                .expect("legacy mutation");
+            connection
+                .execute(
+                    "UPDATE local_sync_state
+                     SET client_instance_id = 'legacy-client',
+                         server_user_id = 'legacy-client',
+                         server_cursor = 'v1.AAAABQ'",
+                    [],
+                )
+                .expect("legacy identity");
+        }
+
+        let store = LocalStore::open(&db_path).expect("upgrade v5 to v6");
+        let initial = store.sync_state().expect("initial state");
+        assert_eq!(initial.server_user_id.as_deref(), Some("legacy-client"));
+        assert_eq!(initial.server_url, None);
+
+        // The pre-auth attempt does not persist the submitted username. It
+        // only marks an incomplete scope, so the worker fails closed.
+        store
+            .prepare_login_scope("https://legacy.example", "alice@example.com")
+            .expect("legacy adoption preflight");
+        let pending = store.sync_state().expect("pending state");
+        assert_eq!(
+            pending.server_url.as_deref(),
+            Some("https://legacy.example")
+        );
+        assert_eq!(pending.server_login_identity, None);
+        assert_eq!(pending.server_user_id, None);
+        assert_eq!(pending.server_cursor, None);
+        assert!(store.assert_server_scope("https://legacy.example").is_err());
+
+        store
+            .record_authenticated_device(
+                "https://legacy.example",
+                "alice@example.com",
+                "legacy-client",
+                "device-1",
+                "real-user-1",
+            )
+            .expect("adopt authenticated user");
+        let adopted = store.sync_state().expect("adopted state");
+        assert_eq!(adopted.server_user_id.as_deref(), Some("real-user-1"));
+        assert_eq!(adopted.server_cursor, None);
+        assert!(store.assert_server_scope("https://legacy.example").is_ok());
+
+        // The same account may retry with its username instead of email; a
+        // different authenticated user is rejected by authoritative user ID.
+        store
+            .prepare_login_scope("https://legacy.example", "alice")
+            .expect("alternate login identity");
+        store
+            .record_authenticated_device(
+                "https://legacy.example",
+                "alice",
+                "legacy-client",
+                "device-2",
+                "real-user-1",
+            )
+            .expect("same user alias");
+        store
+            .prepare_login_scope("https://legacy.example", "bob")
+            .expect("different account attempt");
+        assert!(store
+            .record_authenticated_device(
+                "https://legacy.example",
+                "bob",
+                "legacy-client",
+                "device-3",
+                "real-user-2",
+            )
+            .is_err());
+        assert!(store
+            .prepare_login_scope("https://other.example", "alice")
+            .is_err());
     }
 }

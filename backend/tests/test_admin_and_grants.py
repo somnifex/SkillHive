@@ -1,9 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 from app.core.security import hash_password
-from app.models import User
+from app.models import Skill, SkillVersion, User
+from app.schemas.skill import GlobalSkillUpdate
+from app.services.global_skills import GlobalSkillService
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 
 def login(client: TestClient, username: str, password: str) -> dict[str, str]:
@@ -169,3 +172,65 @@ def test_global_skill_publish_group_grant_and_disable(
         ).status_code
         == 403
     )
+
+
+def test_concurrent_global_skill_updates_serialize_revisions(
+    client: TestClient, db_session: Session
+) -> None:
+    admin = User(
+        username="global-race-admin",
+        display_name="Global Race Admin",
+        email="global-race-admin@example.com",
+        password_hash=hash_password("Admin123!"),
+        status="active",
+        is_global_admin=True,
+    )
+    db_session.add(admin)
+    db_session.commit()
+    admin_headers = login(client, admin.username, "Admin123!")
+    created = client.post(
+        "/api/v1/admin/skills",
+        headers=admin_headers,
+        json={
+            "name": "Concurrent Global Skill",
+            "slug": "concurrent-global-skill",
+            "description": "Revision race fixture",
+            "category": "Testing",
+            "tags": [],
+            "content": {"instructions": "Initial."},
+            "version": "1.0.0",
+        },
+    )
+    assert created.status_code == 201
+    skill_id = str(created.json()["id"])
+
+    engine = db_session.get_bind()
+    admin_id = str(admin.id)
+    db_session.rollback()
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+    def update(instruction: str) -> int:
+        with factory() as session:
+            session_admin = session.get(User, admin_id)
+            assert session_admin is not None
+            try:
+                result = GlobalSkillService(session, session_admin).update(
+                    skill_id,
+                    GlobalSkillUpdate(
+                        content={"instructions": instruction},
+                        change_log="concurrent update",
+                    ),
+                )
+                return result.sync_revision
+            except Exception:
+                session.rollback()
+                raise
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        revisions = list(executor.map(update, ("First.", "Second.")))
+
+    assert sorted(revisions) == [2, 3]
+    db_session.expire_all()
+    skill = db_session.get(Skill, skill_id)
+    assert skill is not None and skill.sync_revision == 3
+    assert db_session.query(SkillVersion).filter(SkillVersion.skill_id == skill_id).count() == 3

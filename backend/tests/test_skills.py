@@ -1,9 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
-from app.models import AuditLog
+from app.core.exceptions import AppError
+from app.models import AuditLog, User
+from app.services.skills import PrivateSkillService
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 
 def auth_header(client: TestClient, username: str) -> dict[str, str]:
@@ -264,3 +267,48 @@ def test_version_tags_rollback_and_export(client: TestClient) -> None:
     with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
         names = archive.namelist()
     assert any(name.endswith("SKILL.md") for name in names)
+
+
+def test_concurrent_version_tag_writes_have_one_explainable_winner(
+    client: TestClient, db_session: Session
+) -> None:
+    """SQLite's write boundary must serialize tag ownership decisions."""
+    headers = auth_header(client, "tag-race")
+    created = create_skill(client, headers)
+    skill_id = str(created["id"])
+    second = client.post(
+        f"/api/v1/skills/{skill_id}/versions",
+        headers=headers,
+        json={
+            "version": "0.2.0",
+            "content": {"instructions": "Second version."},
+            "change_log": "race fixture",
+        },
+    )
+    assert second.status_code == 201
+
+    user_id = db_session.scalar(select(User.id).where(User.username == "tag-race"))
+    assert user_id is not None
+    engine = db_session.get_bind()
+    db_session.rollback()
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+    def assign(version: str) -> str:
+        with factory() as session:
+            user = session.get(User, user_id)
+            assert user is not None
+            try:
+                PrivateSkillService(session, user).set_version_tags(
+                    skill_id,
+                    version,
+                    ["stable"],
+                )
+                return "ok"
+            except AppError as error:
+                session.rollback()
+                return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(assign, ("0.1.0", "0.2.0")))
+
+    assert sorted(results) == ["VERSION_TAG_TAKEN", "ok"]

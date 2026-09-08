@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     change_log_retention_days: int = 90
     receipt_retention_days: int = 90
     blob_gc_batch_size: int = 1000
+    # One bounded maintenance pass per interval.  The worker runs trash
+    # retention, change/receipt trim, then blob GC sequentially so those
+    # destructive operations cannot race each other in one process.
+    maintenance_interval_seconds: int = 24 * 60 * 60
 
 
 @lru_cache

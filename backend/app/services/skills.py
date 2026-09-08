@@ -1,5 +1,6 @@
 from math import ceil
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
@@ -69,6 +70,7 @@ class PrivateSkillService:
         )
 
     def create(self, data: SkillCreate) -> SkillRead:
+        self._begin_private_write()
         if self.repository.slug_exists(self.user.id, data.slug):
             raise AppError("SKILL_SLUG_TAKEN", "A skill with this slug already exists.", 409)
 
@@ -96,7 +98,8 @@ class PrivateSkillService:
         return self._read(self._owned(skill_id))
 
     def update(self, skill_id: str, data: SkillUpdate) -> SkillRead:
-        skill = self._owned(skill_id)
+        self._begin_private_write()
+        skill = self._owned_for_write(skill_id)
         updates = data.model_dump(exclude_unset=True, exclude={"content", "version", "change_log"})
         content = data.content.model_dump(mode="json") if data.content is not None else None
         self.mutations.update_skill(
@@ -112,7 +115,8 @@ class PrivateSkillService:
         return self._read(skill)
 
     def create_version(self, skill_id: str, data: SkillVersionCreate) -> SkillVersionRead:
-        skill = self._owned(skill_id)
+        self._begin_private_write()
+        skill = self._owned_for_write(skill_id)
         version = self.mutations.create_version(
             skill,
             version=data.version,
@@ -165,8 +169,9 @@ class PrivateSkillService:
         raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
 
     def set_version_tags(self, skill_id: str, version: str, tags: list[str]) -> SkillVersionRead:
-        skill = self._owned(skill_id)
-        row = self.repository.version_by_name(skill.id, version)
+        self._begin_private_write()
+        skill = self._owned_for_write(skill_id)
+        row = self.repository.version_by_name_for_update(skill.id, version)
         if row is None:
             raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
         updated = self.mutations.set_version_tags(
@@ -176,8 +181,9 @@ class PrivateSkillService:
         return SkillVersionRead.model_validate(updated)
 
     def rollback(self, skill_id: str, data: VersionRollbackRequest) -> SkillVersionRead:
-        skill = self._owned(skill_id)
-        row = self.repository.version_by_name(skill.id, data.version)
+        self._begin_private_write()
+        skill = self._owned_for_write(skill_id)
+        row = self.repository.version_by_name_for_update(skill.id, data.version)
         if row is None:
             raise AppError("VERSION_NOT_FOUND", "Skill version was not found.", 404)
         created = self.mutations.rollback_version(
@@ -190,7 +196,8 @@ class PrivateSkillService:
         return SkillVersionRead.model_validate(created)
 
     def delete(self, skill_id: str) -> None:
-        skill = self._owned(skill_id)
+        self._begin_private_write()
+        skill = self._owned_for_write(skill_id)
         self.mutations.soft_delete(skill, audit_action="private_skill.deleted")
         self.session.commit()
 
@@ -213,7 +220,8 @@ class PrivateSkillService:
         )
 
     def restore(self, skill_id: str) -> SkillRead:
-        skill = self.repository.private_trashed_for_owner(skill_id, self.user.id)
+        self._begin_private_write()
+        skill = self.repository.private_trashed_for_owner_for_update(skill_id, self.user.id)
         if skill is None:
             raise AppError("SKILL_NOT_FOUND", "Skill was not found in the trash.", 404)
         restored = self.mutations.restore_skill(skill, audit_action="private_skill.restored")
@@ -221,7 +229,8 @@ class PrivateSkillService:
         return self._read(restored)
 
     def purge(self, skill_id: str) -> None:
-        skill = self.repository.private_trashed_for_owner(skill_id, self.user.id)
+        self._begin_private_write()
+        skill = self.repository.private_trashed_for_owner_for_update(skill_id, self.user.id)
         if skill is None:
             raise AppError("SKILL_NOT_FOUND", "Skill was not found in the trash.", 404)
         self.mutations.purge_skill(skill, audit_action="private_skill.purged")
@@ -296,6 +305,28 @@ class PrivateSkillService:
         if skill is None:
             raise AppError("SKILL_NOT_FOUND", "Skill was not found.", 404)
         return skill
+
+    def _owned_for_write(self, skill_id: str) -> Skill:
+        skill = self.repository.private_for_owner_for_update(skill_id, self.user.id)
+        if skill is None:
+            raise AppError("SKILL_NOT_FOUND", "Skill was not found.", 404)
+        return skill
+
+    def _begin_private_write(self) -> None:
+        """Acquire a database-level write boundary before reading the head.
+
+        PostgreSQL uses ``FOR UPDATE`` in the repository query. SQLite does
+        not implement row locks, so an immediate transaction serializes the
+        read/modify/flush sequence against other SQLite writers. The session
+        may still contain the read-only transaction opened by auth dependency
+        queries; rolling that back is safe because this facade owns all
+        mutations for the request and the authenticated User object is
+        re-used only by identity.
+        """
+        bind = self.session.get_bind()
+        if bind.dialect.name == "sqlite":
+            self.session.rollback()
+            self.session.execute(text("BEGIN IMMEDIATE"))
 
     def _read(self, skill: Skill, *, include_content: bool = True) -> SkillRead:
         current = self.repository.version(skill.current_version_id) if include_content else None

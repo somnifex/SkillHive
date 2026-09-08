@@ -3,7 +3,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use super::LocalStoreError;
 use std::path::Path;
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 5;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 6;
 
 pub(super) const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -219,6 +219,22 @@ pub(super) const MIGRATIONS: &[(i64, &str)] = &[
             profile_ids TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        "#,
+    ),
+    (
+        6,
+        r#"
+        -- The server/user scope is deliberately kept in the durable local
+        -- store.  A cursor, device registration and outbox are meaningful
+        -- only for one server account; without this binding a server switch
+        -- could replay the previous account's mutations.
+        ALTER TABLE local_sync_state ADD COLUMN server_url TEXT;
+        ALTER TABLE local_sync_state ADD COLUMN server_login_identity TEXT;
+
+        -- A conflict must retain the immutable local snapshot while also
+        -- remembering the remote head package.  The old single hash column
+        -- could not represent both values safely.
+        ALTER TABLE local_skills ADD COLUMN remote_blob_hash TEXT;
         "#,
     ),
 ];

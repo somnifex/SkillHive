@@ -18,6 +18,14 @@ function relativeTime(iso: string | null): string {
   return `${Math.round(seconds / 86400)} 天前`;
 }
 
+function latestSyncAt(pushAt: string | null, pullAt: string | null): string | null {
+  const timestamps = [pushAt, pullAt].filter((value): value is string => Boolean(value));
+  return timestamps.reduce<string | null>((latest, current) => {
+    if (!latest) return current;
+    return Date.parse(current) > Date.parse(latest) ? current : latest;
+  }, null);
+}
+
 /**
  * Desktop-only sync status chip for the top bar: last cycle time, queued
  * errors, conflict count and a manual "sync now" trigger.
@@ -52,10 +60,12 @@ function SyncStatusInner() {
 
   const data = state.data ?? null;
   const loggedIn = Boolean(data?.deviceId);
+  const lastSyncAt = data
+    ? latestSyncAt(data.lastSuccessfulPushAt, data.lastSuccessfulPullAt)
+    : null;
   const detail = data ? (
     <div>
-      <div>推送：{relativeTime(data.lastSuccessfulPushAt)}</div>
-      <div>拉取：{relativeTime(data.lastSuccessfulPullAt)}</div>
+      <div>最近同步：{relativeTime(lastSyncAt)}</div>
       {data.lastServerError ? (
         <div style={{ color: "#ff4d4f" }}>最近错误：{data.lastServerError}</div>
       ) : null}
@@ -76,7 +86,7 @@ function SyncStatusInner() {
   }
 
   return (
-    <Tooltip title={detail} placement="bottom">
+    <Tooltip title={detail} placement="bottom" trigger={["hover", "focus"]}>
       <Badge dot={Boolean(data?.lastServerError)} status="error" offset={[-4, 4]}>
         <Button
           size="small"
@@ -91,9 +101,7 @@ function SyncStatusInner() {
           onClick={() => sync.mutate()}
           aria-label="立即同步"
         >
-          <span className="sync-chip-label">
-            {loggedIn ? relativeTime(data.lastSuccessfulPushAt) : "未登录同步"}
-          </span>
+          <span className="sync-chip-label">{loggedIn ? "同步" : "未登录"}</span>
         </Button>
       </Badge>
     </Tooltip>

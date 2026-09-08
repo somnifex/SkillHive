@@ -37,12 +37,15 @@ import/export. Design of record:
 `docs/architecture/group-tree-and-admin-console.md`.
 
 - Branch: **`feat/group-tree-admin`**, forked from `main` (`6f4c604`) via a
+
   separate worktree (`../SkillHive-group-tree`) because
   `feat/wanhua-ui-revamp` carries uncommitted UI work that must not mix in.
 - Known limitation: `origin` is SSH-only and unreachable from the current
+
   environment, so the fork point is the local `origin/main` ref; re-fetch and
   rebase before opening a PR.
 - Phases: 0 design doc → 1 group tree (backend+frontend) → 2 admin console +
+
   S3 storage → 3 login server address → 4 zip import/export. Update this
   section as each phase lands.
 
@@ -64,6 +67,7 @@ restored.
 ### Landed 2026-09-07 (all phases, commits `027088b` → `dc94566`)
 
 - **Group tree** (`41dd0ad` + `af768df`): `groups.parent_id` self-reference
+
   (migration `e8f1a2b3c4d5`), effective-role resolution via recursive CTE
   (ancestor owner/admin grants admin on descendants; owner-only operations
   stay local; global admins act as implicit tree root), depth limit 16,
@@ -72,6 +76,7 @@ restored.
   frontend tree table with parent column, sub-group creation, breadcrumbs.
   Skill grants deliberately do NOT inherit down the tree (design §2.3).
 - **Admin console + storage** (`bdc47c9` + `b758c78`): `system_settings`
+
   table (migration `f7a8b9c0d1e2`), `S3BlobStorage` behind a
   `RoutedBlobStorage` facade (writes to the active backend, reads fall back
   across configured backends; a switch takes effect on the next operation
@@ -80,6 +85,7 @@ restored.
   with session revocation / guarded soft delete), `GET /admin/groups/tree`,
   and the AdminPage surfaces (users, group tree, system settings).
 - **Server address** (`12d9be3`): login/register pages gain a server
+
   address field with a live test; web persists in localStorage with a
   dynamic axios base URL; desktop persists in Rust (`server.json`, atomic
   write, validated, env fallback) via `get/set_server_url` commands,
@@ -88,6 +94,7 @@ restored.
   namespaced per server (SHA-256 prefix) — existing desktop installs
   re-login once.
 - **Zip packaging** (`dc94566`): desktop-only import/export through native
+
   dialogs opened in Rust (WebView never submits paths); import validates
   entry names/sizes, reuses the full snapshot capture policy and queues the
   create mutation through the standard commit path; export materializes the
@@ -97,17 +104,21 @@ restored.
 Validation truth (2026-09-07, worktree `../SkillHive-group-tree`):
 
 - backend: `uv run ruff check backend` clean; `uv run mypy backend/app
+
   backend/tests` clean (strict, 86 files); `uv run pytest backend/tests` →
   **130 passed**; Alembic fresh → head (`f7a8b9c0d1e2`) and staged upgrades
   `c4d5e6f7a8b9 → e8f1a2b3c4d5 → f7a8b9c0d1e2` with legacy data intact,
   `ck_groups_parent_not_self` enforced.
 - frontend: `pnpm lint/typecheck/test/build` all green.
 - desktop: `cargo test --lib` → **107 passed**; `cargo clippy -D warnings`
+
   and `cargo fmt --check` clean.
 - Known flake (pre-existing, also on clean tree): see the
+
   `telemetry::tests::events_append_json_lines` note in
   `LOCAL_VALIDATION_CHECKLIST.md` §1.
 - PostgreSQL/MySQL migration re-validation still bypassed per owner
+
   instruction (no server available) — unchanged from the standing record.
 
 ### Landed 2026-09-07 (desktop productization, branch `feat/desktop-productization`)
@@ -116,9 +127,11 @@ Owner-requested product package closing three feedback items (no visible
 upload path, "why is this a web page", management gaps):
 
 - **NSIS packaging** (`tauri.conf.json` `bundle.active=true`, zh/en NSIS,
+
   `icons/icon.ico`): `pnpm tauri build` now emits a Windows installer; the
   desktop app is the primary product form while the web build keeps working.
 - **Agent deployment surfaced in UI**: built-in adapters extended to 12
+
   (+ Cursor `~/.cursor/skills`, Windsurf `~/.windsurf/skills`, Trae
   `~/.trae/skills`, ZCode `~/.zcode/skills`; conventional paths, verify
   against vendor docs if a target disagrees). New `/agents` page: discovery
@@ -128,14 +141,17 @@ upload path, "why is this a web page", management gaps):
   table), hydrate ("下载到本地"), and batch deploy/delete; pagination bug
   fixed (server-side page param wired).
 - **Workspace hydration (closes M2.5 leftover)**: new `hydrate_skill`
+
   engine + `hydrate_skill_workspace` command materialize a pulled
   `remote_only` skill's snapshot closure (verified blob downloads) and its
   managed workspace; deploy commands auto-hydrate first. Pulled skills are
   now deployable end to end.
 - **Sync/conflict surfaces**: top-bar SyncStatus chip (last push/pull,
+
   server-error badge, 立即同步), desktop-only conflict center in Settings
   (`list_conflicts` + keep_local/keep_remote).
 - **Trash lifecycle (server)**: soft delete = recycle bin;
+
   `GET /skills/trash`, `POST /skills/{id}/restore` (returns as draft),
   `DELETE /skills/{id}/purge` (versions cascade; blobs reclaimed by GC);
   admin setting `trash_retention_days` (default 30, `0`=manual only) with a
@@ -143,6 +159,7 @@ upload path, "why is this a web page", management gaps):
   match the (owner, slug) unique constraint (409 instead of 500 on
   trash-reserved slugs).
 - **Version management**: `skill_versions.tags` JSON column (migration
+
   `a9b0c1d2e3f4`), `PUT .../versions/{version}/tags` (unique per skill),
   `POST /skills/{id}/rollback` (mints a NEW patch version from an old
   content — additive, never a history rewrite), `GET .../versions/{version}/export`
@@ -161,6 +178,7 @@ Ran the full product loop against `uvicorn` (SQLite, port 8000) and the
 built `skillhive-desktop.exe`, driven through the GUI:
 
 - **Fixed during testing (3 real bugs):** desktop WebView CORS preflight
+
   rejected (`http://tauri.localhost` missing from `cors_origins`); sync
   device never registered because `desktop_login` had no UI caller (login
   page now registers the device + triggers an immediate cycle; logout clears
@@ -169,6 +187,7 @@ built `skillhive-desktop.exe`, driven through the GUI:
   (manifest deserializes both spellings now, unit-tested); sync chip showed
   "8 hours ago" on UTC+8 (SQLite CURRENT_TIMESTAMP parsed as local time).
 - **Verified live:** register + login (web session + device registration);
+
   skill creation from the UI; pull landing the skill locally (`remote_only`);
   hydration ("下载到本地" → `remote_only`→`synced`, workspace + SKILL.md
   materialized); **one-click deploy to both `~/.zcode/skills/literature-review`
@@ -180,6 +199,7 @@ built `skillhive-desktop.exe`, driven through the GUI:
   (mints 0.1.1 "回滚自 0.1.0"), per-version zip export (SKILL.md inside).
 - Sync worker cycles healthy throughout (ok, 72-98ms per cycle).
 - Remaining known cosmetic: session loss on WebView reload (access-token
+
   expiry drops the web session while keyring credentials persist) — user
   re-logs in; recording as known issue.
 
@@ -192,44 +212,78 @@ fully merged). Content is identical to the branch tip that passed the full
 gate set and the 2026-09-07/08 live E2E run. `origin` remains unreachable
 (SSH) — push `main` when access is restored.
 
+### Architecture review closure (2026-09-08, commit `d0fb9e2`)
+
+A post-refactor correctness review found and fixed the remaining desktop
+account-boundary, hydration, REST concurrency and maintenance gaps:
+
+- desktop schema v6 binds the durable cursor/device/outbox to one server and
+
+  authenticated user, records the real server user id, supports guarded
+  one-time adoption of populated v5 stores, and rejects cross-account/server
+  reuse;
+- remote package updates retain conflict-local snapshots separately, move
+
+  stale clean mirrors back to `remote_only`, and atomically replace an old
+  managed workspace using a manifest-hash compare-and-swap;
+- private and global REST Skill writes serialize revision changes with
+
+  SQLite `BEGIN IMMEDIATE` or row locks on databases that support them;
+- desktop logout disables local credential use before network I/O, attempts
+
+  server-side refresh-session revocation, and clears local credentials even
+  when the server is unavailable;
+- WebView reload/access-token recovery now obtains only a short-lived access
+
+  session through Rust; refresh credentials remain behind the OS credential
+  boundary;
+- the production maintenance worker now runs trash retention, bounded
+
+  change/receipt trimming, and bounded blob mark-and-sweep sequentially.
+
+Validation: backend Ruff + strict mypy clean and **139 pytest passed**;
+frontend lint/typecheck/test/build green; Rust fmt/clippy green and **121
+non-credential tests passed in the sandbox**. Three Windows Credential
+Manager tests could not access the host credential store from the review
+sandbox; the implementing local-agent run reported the full serial suite at
+124 passed outside that restriction. The code fixes are recorded in
+`d0fb9e2`; this status-document update remains uncommitted.
+
 ## Current milestone state
 
-| Milestone | Current state |
-| --- | --- |
-| M0 Desktop/architecture foundation | COMPLETE |
-| M1 Durable local desktop core | CODE COMPLETE / PENDING LOCAL VALIDATION |
-| M2 Cloud sync epic (#4) | IN PROGRESS |
-| M2.0 Shared Skill mutation path (#5) | CODE COMPLETE — backend validated locally (see validation truth) |
-| M2.1 Protocol/schema foundation (#6) | IN PROGRESS — SQLite-validated; PostgreSQL/MySQL bypassed by owner instruction |
-| M2.2 Package/blob storage (#7) | CODE COMPLETE — backend storage/transport validated on SQLite; GC design doc landed and the destructive sweep + cursor-expiry contract are implemented with unit tests (`a4f28c3`), **but `run_blob_gc`/`trim_expired_rows` have no production scheduler yet — see known issues** |
-| M2.3 Device identity/secure credentials (#8) | CODE COMPLETE — server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
-| M2.4 Idempotent push (#9) | CODE COMPLETE (desktop) — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed |
-| M2.5 Durable pull/change feed (#10) | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; **workspace hydration landed 2026-09-07 on `feat/desktop-productization` (`hydrate_skill` + `hydrate_skill_workspace`, pulled skills deploy end to end)** |
-| M2.6 Desktop sync orchestrator (#11) | CODE COMPLETE (desktop) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake landed (`sync_worker.rs`) and validated live |
-| M2.7 Conflicts/reliability checkpoint (#12) | CODE COMPLETE (desktop) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side AND live client-process scenarios validated 2026-09-06 (see validation truth)** |
-| M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED — grant offline policy (migration `c4d5e6f7a8b9`), signed JWT entitlement leases shipped in pull metadata, desktop schema-v4 entitlement store, pull-apply + startup + post-pull reconciliation landed (`b2165a7`, `b5be325`, `97fe35e`, `bef5977`); **live CDP scenarios validated 2026-09-07 (see validation truth)** |
-| M4 Production hardening | IN PROGRESS — observability + migration safety landed (commits `0d0fba4`, `1b0b2c5`, `210af26`, `bf64a8f`; see M4 state below). Remaining: fault-injection test package, signed release/update process (design-only), release SLO gates doc |
+| Milestone                                    | Current state                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| M0 Desktop/architecture foundation           | COMPLETE                                                                                                                                                                                                                                                                                                                                               |
+| M1 Durable local desktop core                | CODE COMPLETE / PENDING LOCAL VALIDATION                                                                                                                                                                                                                                                                                                               |
+| M2 Cloud sync epic (#4)                      | IN PROGRESS                                                                                                                                                                                                                                                                                                                                            |
+| M2.0 Shared Skill mutation path (#5)         | CODE COMPLETE — backend validated locally (see validation truth)                                                                                                                                                                                                                                                                                       |
+| M2.1 Protocol/schema foundation (#6)         | IN PROGRESS — SQLite-validated; PostgreSQL/MySQL bypassed by owner instruction                                                                                                                                                                                                                                                                         |
+| M2.2 Package/blob storage (#7)               | CODE COMPLETE — backend storage/transport validated on SQLite; GC design, destructive sweep and cursor-expiry contract are implemented, unit-tested, and wired into the bounded production maintenance worker (2026-09-08 review closure)                                                                                                              |
+| M2.3 Device identity/secure credentials (#8) | CODE COMPLETE — server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass                                                                                                                                                                                                                                                   |
+| M2.4 Idempotent push (#9)                    | CODE COMPLETE (desktop) — push endpoint validated; desktop durable ACK transaction, blob negotiation/upload, push client landed                                                                                                                                                                                                                        |
+| M2.5 Durable pull/change feed (#10)          | CODE COMPLETE (desktop) — page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration is end-to-end and remote-head replacement now atomically repairs stale existing workspaces with hash-CAS protection                                                                                                       |
+| M2.6 Desktop sync orchestrator (#11)         | CODE COMPLETE (desktop) — `SyncEngine::run_cycle` composes session→device→push→pull with durable state; WebView commands (`desktop_login`, `desktop_logout`, `sync_now`, `sync_state`) wired; background triggers/periodic wake landed (`sync_worker.rs`) and validated live                                                                           |
+| M2.7 Conflicts/reliability checkpoint (#12)  | CODE COMPLETE (desktop) — `list_conflicts` + keep-local/keep-remote resolution ops, 4xx→permanent-error classifier wired into dispatch; **live server-side AND live client-process scenarios validated 2026-09-06 (see validation truth)**                                                                                                             |
+| M3 Enterprise offline authorization          | CODE COMPLETE + LIVE-VALIDATED — grant offline policy (migration `c4d5e6f7a8b9`), signed JWT entitlement leases shipped in pull metadata, desktop schema-v4 entitlement store, pull-apply + startup + post-pull reconciliation landed (`b2165a7`, `b5be325`, `97fe35e`, `bef5977`); **live CDP scenarios validated 2026-09-07 (see validation truth)** |
+| M4 Production hardening                      | IN PROGRESS — observability + migration safety landed (commits `0d0fba4`, `1b0b2c5`, `210af26`, `bf64a8f`; see M4 state below). Remaining: fault-injection test package, signed release/update process (design-only), release SLO gates doc                                                                                                            |
 
 ## Exact next task
 
 1. **DONE (2026-09-08)**: `feat/desktop-productization` merged into local
+
    `main` (`c4f8078`); feature branches `feat/group-tree-admin` and
    `feat/wanhua-ui-revamp` verified fully merged and kept. Remaining: push
    `main` to `origin` when SSH access is restored.
-2. **Wire GC/trim into production scheduling** — `run_blob_gc`
-   (destructive mark-and-sweep) and `trim_expired_rows` are implemented with
-   unit tests (`a4f28c3`) and the `SYNC_CURSOR_EXPIRED` contract is live in
-   `sync_changes.py`, but **neither has a production caller**; today only the
-   trash-retention sweep is scheduled in `main.py`. Until wired in, purged
-   skills leave orphan blobs that only manual GC runs reclaim. Decide:
-   daily worker (alongside the trash sweep) or documented manual trigger.
-3. **Known issue — web session loss on WebView reload**: an expired access
-   token drops the REST session while keyring credentials persist; the user
-   must re-login. Either persist the access token behind the Rust boundary
-   or auto-restore the session from the device credential at startup.
-4. **PostgreSQL/MySQL migration re-validation** when a server becomes
+2. **Review the 2026-09-08 architecture-review closure** in `d0fb9e2` and the
+
+   current documentation diff; then repeat the live desktop
+   login/switch/logout and remote-update hydration scenarios against a real
+   server and Windows Credential Manager.
+3. **PostgreSQL/MySQL migration re-validation** when a server becomes
+
    available (owner bypassed SQL-server flows, 2026-09-04).
-5. M4 remaining: fault-injection test package (mostly covered live; needs
+4. M4 remaining: fault-injection test package (mostly covered live; needs
+
    the one recorded checklist), signed release/update process (design-only),
    release SLO gates doc.
 
@@ -238,34 +292,42 @@ gate set and the 2026-09-07/08 live E2E run. `origin` remains unreachable
 Server side (commit `b2165a7` + `b5be325`):
 
 - `group_skill_grants` carries `offline_policy` (`unlimited`/`ttl`/
+
   `disabled`) + `offline_ttl_hours` with DB-level CHECK constraints
   (migration `c4d5e6f7a8b9`; legacy grants backfill `unlimited`).
 - Grant create/update APIs accept and persist the policy with pairing
+
   validation; admin grant-revoke flow unchanged.
 - `app/services/entitlements.py` signs leases with the existing JWT secret
+
   under a dedicated `type: "skill_lease"` claim (access tokens can never be
   replayed as leases and vice versa). `unlimited` gets a 7-day refresh
   bound instead of infinite expiry; `disabled` leases are dead on arrival
   (exp == issued); `ttl` uses the grant's hours. `policy_version` derives
   from the grant's `updated_at`.
 - The pull projection (`sync_changes.py`) attaches `metadata.entitlement`
+
   (lease token, permission level, policy, ttl, signed `issued_at`/
   `expires_at`) for grant-entitled managed skills.
 
 Desktop side (commits `97fe35e` + `bef5977`):
 
 - Schema v4 adds `local_entitlements` (lease stored verbatim) with
+
   expiry indexing.
 - `apply_changes_page` extracts `metadata.entitlement` inside the same
+
   page transaction: fresh lease keeps the skill usable; expired-at-apply
   flips it `access_revoked`; fresh lease re-entitles an expired-lease
   revocation; a malformed lease fails the whole page (cursor never
   advances past an uninterpretable lease — fail closed).
 - `expire_due_entitlements` runs at startup (before cache/agent
+
   reconciliation) and after each sync pull; it also marks active
   deployments `revoked`. Reconciled skill IDs surface in
   `DesktopStartupStatus.expiredEntitlements`.
 - Trust model (handoff §15.3): the desktop enforces the expiry contract as
+
   a policy clock from the authenticated transport; it does not verify the
   lease signature locally and makes no DRM claims.
 
@@ -347,31 +409,40 @@ seeded global skill 需求澄清助手 to a group; member `howie` logged in via 
 real client process. `sync_now` pulled the change feed and the desktop:
 
 - schema upgraded to v4 (`local_entitlements` created); the pulled upsert
+
   landed with `metadata.entitlement` carrying the signed JWT lease, policy
   `ttl`/8h, and server-signed `issued_at`/`expires_at` — OK;
 - **ttl lease honoured**: desktop stored the lease verbatim; skill usable
+
   (`remote_only` → deploy attempt correctly refused by state gate, not by
   the lease) — OK;
 - **grant revoke → lease re-issue cycle**: with all grants revoked, the
+
   pull no longer ships a lease; backdating the stored lease (simulated
   expiry) + `sync_now` → post-pull sweep flipped the skill
   `access_revoked` — OK;
 - **expired lease gates deployment**: deploy attempt in `AccessRevoked`
+
   state → rejected (`not deployable in state AccessRevoked`) — OK;
 - **deployment revocation reconciliation**: seeded an `installed`
+
   deployment, expired the lease, `sync_now` → skill `access_revoked` AND
   deployment → `revoked` with `last_error` "entitlement expired;
   deployment revoked by offline policy" — OK;
 - **re-entitlement**: fresh grants + new feed event → fresh lease cleared
+
   the expired-lease revocation (skill back to `synced`, new expiry stamped)
   — OK (validated twice, including after the disabled-policy cycle);
 - **disabled policy (restricted, zero offline window)**: grants set to
+
   `disabled` → pulled lease expires at issuance (exp == issued) and the
   post-pull sweep immediately revoked the skill — OK;
 - **server-side write gate (exit criterion)**: a non-owner update mutation
+
   against the managed global skill → protocol `permission_denied`
   (`SKILL_NOT_FOUND`) with a durable receipt — OK;
 - **startup surface**: `desktop_startup_status` exposes
+
   `expiredEntitlements`; `sync_state` stayed clean (`last_server_error`
   null) through all cycles — OK.
 

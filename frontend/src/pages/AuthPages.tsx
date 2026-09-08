@@ -57,7 +57,6 @@ function AuthSide({ mode }: { mode: "login" | "register" }) {
           <li>群组共享与全局技能统一管理</li>
           <li>一键部署到本地 Agent 工作区</li>
         </ul>
-        <p className="auth-side-meta">化学，让生活更美好 · BETTER CHEMISTRY, BETTER LIFE</p>
       </div>
     </aside>
   );

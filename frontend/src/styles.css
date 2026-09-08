@@ -1,5 +1,5 @@
 /* ============================================================
-   SkillHive — 万华配色设计系统
+   SkillHive — 通用配色设计系统
    主色 #00489D 深蓝 · 辅色 #0096DC 明蓝 / #5B9BD5 中蓝 /
    #8497B0 蓝灰 / #BBC3CE 浅灰蓝 / #262626 深灰 /
    #FFC100 黄 / #92D050 绿
@@ -177,7 +177,7 @@ img {
   background: transparent !important;
 }
 
-/* 侧边栏：万华深蓝 */
+/* 侧边栏：深蓝品牌色 */
 
 .sidebar {
   position: sticky !important;

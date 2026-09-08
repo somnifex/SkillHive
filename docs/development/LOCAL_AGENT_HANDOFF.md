@@ -57,21 +57,21 @@ No GitHub Actions workflow is enabled for this development phase.
 
 ## 2. Milestone status
 
-| Milestone | Status | GitHub | Meaning |
-| --- | --- | --- | --- |
-| M0 Desktop/architecture foundation | COMPLETE | tracked by #1 | Architecture and desktop shell established |
-| M1 Durable local desktop core | CODE COMPLETE / UNIT-VALIDATED | #2 | cargo suite green since 2026-09-05 (31→107→116 tests); live E2E partially validated 2026-09-08 |
-| M2 Cloud sync epic | IN PROGRESS | #4 | Detailed design and issue breakdown exist |
-| M2.0 Shared server mutation path | CODE COMPLETE / PENDING LOCAL VALIDATION | #5 | Implemented and statically reviewed; tests not run |
-| M2.1 Protocol/schema foundation | IN PROGRESS | #6 | Major schema/protocol pieces implemented; must be locally validated and finished |
-| M2.2 Package/blob storage | CODE COMPLETE | #7 | Storage/transport implemented and locally validated; GC design doc landed (`docs/development/GC_DESIGN.md`), destructive sweep deferred by design |
-| M2.3 Device identity/credentials | CODE COMPLETE | #8 | Server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass |
-| M2.4 Idempotent push | CODE COMPLETE (desktop) | #9 | Push endpoint validated live; desktop durable ACK transaction, blob negotiation/upload, push client landed |
-| M2.5 Durable pull/change feed | CODE COMPLETE (desktop) | #10 | Page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration landed 2026-09-07 (`hydrate_skill`, pulled skills now deployable) |
-| M2.6 Desktop sync orchestrator | CODE COMPLETE (core) | #11 | `SyncEngine::run_cycle` + background triggers landed; WebView commands wired |
-| M2.7 Conflict/reliability checkpoint | CODE COMPLETE (core) | #12 | Conflict query/resolution + 4xx classifier landed; server-side and live client-process scenarios validated 2026-09-06 |
-| M3 Enterprise offline authorization | CODE COMPLETE + LIVE-VALIDATED | roadmap | Signed entitlement leases shipped in pull metadata; desktop schema-v4 store + pull-apply/startup/post-pull reconciliation; live CDP validation 2026-09-07 (see CURRENT_STATUS.md) |
-| M4 Production hardening | IN PROGRESS | roadmap | Observability + migration safety landed; NSIS installer packaging landed 2026-09-07 (`bundle.active=true`, zh/en); signed updates + SLO gates still design-only |
+| Milestone                            | Status                                   | GitHub        | Meaning                                                                                                                                                                           |
+| ------------------------------------ | ---------------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M0 Desktop/architecture foundation   | COMPLETE                                 | tracked by #1 | Architecture and desktop shell established                                                                                                                                        |
+| M1 Durable local desktop core        | CODE COMPLETE / UNIT-VALIDATED           | #2            | cargo suite green since 2026-09-05 (31→107→116 tests); live E2E partially validated 2026-09-08                                                                                    |
+| M2 Cloud sync epic                   | IN PROGRESS                              | #4            | Detailed design and issue breakdown exist                                                                                                                                         |
+| M2.0 Shared server mutation path     | CODE COMPLETE / PENDING LOCAL VALIDATION | #5            | Implemented and statically reviewed; tests not run                                                                                                                                |
+| M2.1 Protocol/schema foundation      | IN PROGRESS                              | #6            | Major schema/protocol pieces implemented; must be locally validated and finished                                                                                                  |
+| M2.2 Package/blob storage            | CODE COMPLETE                            | #7            | Storage/transport implemented and locally validated; GC design doc landed (`docs/development/GC_DESIGN.md`), destructive sweep deferred by design                                 |
+| M2.3 Device identity/credentials     | CODE COMPLETE                            | #8            | Server endpoints + desktop identity/credential/HTTP boundary; local cargo tests pass                                                                                              |
+| M2.4 Idempotent push                 | CODE COMPLETE (desktop)                  | #9            | Push endpoint validated live; desktop durable ACK transaction, blob negotiation/upload, push client landed                                                                        |
+| M2.5 Durable pull/change feed        | CODE COMPLETE (desktop)                  | #10           | Page apply + cursor commit + HTTP pull client + verified blob download landed; workspace hydration landed 2026-09-07 (`hydrate_skill`, pulled skills now deployable)              |
+| M2.6 Desktop sync orchestrator       | CODE COMPLETE (core)                     | #11           | `SyncEngine::run_cycle` + background triggers landed; WebView commands wired                                                                                                      |
+| M2.7 Conflict/reliability checkpoint | CODE COMPLETE (core)                     | #12           | Conflict query/resolution + 4xx classifier landed; server-side and live client-process scenarios validated 2026-09-06                                                             |
+| M3 Enterprise offline authorization  | CODE COMPLETE + LIVE-VALIDATED           | roadmap       | Signed entitlement leases shipped in pull metadata; desktop schema-v4 store + pull-apply/startup/post-pull reconciliation; live CDP validation 2026-09-07 (see CURRENT_STATUS.md) |
+| M4 Production hardening              | IN PROGRESS                              | roadmap       | Observability + migration safety landed; NSIS installer packaging landed 2026-09-07 (`bundle.active=true`, zh/en); signed updates + SLO gates still design-only                   |
 
 `CODE COMPLETE` must not be relabeled `VERIFIED` until the local validation checklist has actually been run.
 
@@ -1361,7 +1361,7 @@ Keep cloud authorization out of Agent adapters.
 ## 20.
 
 > Resolved 2026-09-06/08: the sync stack described below has since been
-> runtime-verified live (M2.7 conflict scenarios + 2026-09-08 end-to-end
+>
 > productization run). Text retained as the historical record. Current implementation is not runtime-verified
 
 Do not assume any of the following pass merely because files exist:
@@ -1444,6 +1444,38 @@ validated live through the real client process on 2026-09-06.
 The prohibition stands as a design rule: the sync loop must never fall back
 to plain CRUD endpoints; it exists precisely because CRUD lacks idempotent
 receipts, package transfer and durable cursors.
+
+### 25.1 Post-refactor review closure (2026-09-08)
+
+Commit `d0fb9e2` closes issues found by a full architecture review after
+desktop productization:
+
+- local schema v6 establishes a durable server/account scope and separates a
+
+  conflicted local snapshot hash from the remote head hash;
+- populated schema-v5 stores are adopted only after authentication returns
+
+  the real server user id; cursor/outbox reuse across servers or users fails
+  closed;
+- a remote package update invalidates an old clean workspace and hydration
+
+  replaces it atomically with a manifest-hash CAS;
+- private and global REST Skill revision writes are serialized on SQLite and
+
+  row-locked on server databases;
+- logout revokes remotely when possible but always disables and clears local
+
+  credential use, and WebView recovery exposes only short-lived access data;
+- server maintenance scheduling now invokes trash purge, sync-history trim,
+
+  and blob GC in bounded sequential transactions.
+
+Local gates recorded for this package: backend 139 pytest passed plus Ruff
+and strict mypy; frontend lint/typecheck/test/build passed; Rust fmt/clippy
+passed. The review sandbox passed 121 Rust tests and could not execute three
+Windows Credential Manager integration tests because host credential access
+was denied; repeat those and the live account-switch/logout scenarios before
+release. The accompanying handoff-document update remains uncommitted.
 
 ---
 

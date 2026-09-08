@@ -286,7 +286,8 @@ export function AgentDeployPage() {
         mode="multiple"
         allowClear
         placeholder="选择默认部署目标"
-        style={{ maxWidth: 560 }}
+        className="deployment-target-select"
+        style={{ width: "100%", maxWidth: 720 }}
         value={defaultTargets ?? prefs.data?.defaultTargets ?? []}
         loading={prefs.isLoading}
         options={targetOptions}
